@@ -1,0 +1,31 @@
+# dependencies
+/node_modules
+/.pnpm-store
+
+# next.js
+/.next/
+/out/
+
+# build outputs
+build
+dist
+*.tsbuildinfo
+
+# debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# local env files
+.env*.local
+.env
+!.env.example
+
+# vercel & agent scratch directories
+.vercel
+.freebuff
+.agents
+
+# OS files
+.DS_Store
+Thumbs.db

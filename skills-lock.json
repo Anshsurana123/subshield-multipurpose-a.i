@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "steel-browser": {
+      "source": "steel-dev/skills",
+      "sourceType": "github",
+      "skillPath": "steel-browser/SKILL.md",
+      "computedHash": "07288d259fb95b60e33a282718e003f8217dcd0d5bc0bcbca89fac645fe12634"
+    },
+    "steel-developer": {
+      "source": "steel-dev/skills",
+      "sourceType": "github",
+      "skillPath": "steel-developer/SKILL.md",
+      "computedHash": "f5b4acc387514380c6f73d7b2f59ec2daee1e8f06e7f4f2bb9bc266b74d0d79b"
+    },
+    "steel-reliability": {
+      "source": "steel-dev/skills",
+      "sourceType": "github",
+      "skillPath": "steel-reliability/SKILL.md",
+      "computedHash": "b9a3f514e155af9a18ad77c17f488e7fed403bff931e747eccc76d5e7cd92189"
+    },
+    "steel-session-debugging": {
+      "source": "steel-dev/skills",
+      "sourceType": "github",
+      "skillPath": "steel-session-debugging/SKILL.md",
+      "computedHash": "4fe837943d722bee13e9c30f1af56bddb28adff07d833a31a292b12685ca6abb"
+    }
+  }
+}
