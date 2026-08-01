@@ -179,7 +179,7 @@ export async function parseFoodOrderItems(text: string): Promise<FoodOrderItem[]
 
   try {
     const res = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: process.env.OPENAI_MODEL || 'gpt-5.6-luna',
       temperature: 0,
       response_format: { type: 'json_object' },
       messages: [
@@ -283,7 +283,7 @@ export async function normalizeFoodItems(items: FoodOrderItem[]): Promise<FoodOr
   if (!items.length || !process.env.OPENAI_API_KEY) return null;
   try {
     const res = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: process.env.OPENAI_MODEL || 'gpt-5.6-luna',
       temperature: 0,
       response_format: { type: 'json_object' },
       messages: [

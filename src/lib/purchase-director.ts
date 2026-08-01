@@ -119,15 +119,30 @@ export async function directPurchaseRequest(text: string): Promise<PurchasePlan 
   if (!apiKey) return null;
 
   try {
-    const res = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      temperature: 0,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: DIRECTOR_SYSTEM },
-        { role: 'user', content: text },
-      ],
-    });
+    const preferredModel = process.env.OPENAI_MODEL || 'gpt-5.6-luna';
+    let res;
+    try {
+      res = await openai.chat.completions.create({
+        model: preferredModel,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: DIRECTOR_SYSTEM },
+          { role: 'user', content: text },
+        ],
+      });
+    } catch (modelErr: any) {
+      console.warn(`[PurchaseDirector] Model ${preferredModel} failed (${modelErr?.message || modelErr}) — falling back to gpt-4o-mini`);
+      res = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: DIRECTOR_SYSTEM },
+          { role: 'user', content: text },
+        ],
+      });
+    }
     const raw = res.choices[0]?.message?.content || '{}';
     const data = JSON.parse(raw);
 
