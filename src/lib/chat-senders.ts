@@ -70,7 +70,9 @@ export async function sendLinqMessage(chatId: string, text: string): Promise<boo
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          parts: [{ type: 'text', value: text }],
+          message: {
+            parts: [{ type: 'text', value: text }],
+          },
         }),
       }
     );

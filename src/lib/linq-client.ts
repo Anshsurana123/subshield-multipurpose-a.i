@@ -19,6 +19,7 @@ export function verifyLinqWebhookSignature(
   }
 
   const candidates = [
+    headers.get('x-webhook-signature'),
     headers.get('x-linq-signature'),
     headers.get('x-signature'),
     headers.get('linq-signature'),

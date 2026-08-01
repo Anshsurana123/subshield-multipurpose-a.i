@@ -64,6 +64,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'No chat id' }, { status: 400 });
     }
 
+    // Ignore outbound messages (e.g. sent by the bot itself) to prevent reply loops
+    const direction = message?.direction || body?.data?.direction || body?.direction;
+    if (direction === 'outbound') {
+      return NextResponse.json({ success: true, message: 'Ignored outbound message' });
+    }
+
     // Only handle incoming text messages; ignore delivery receipts, typing indicators etc.
     if (!text || (eventType && !String(eventType).includes('message.received') && !String(eventType).includes('message.created'))) {
       return NextResponse.json({ success: true, message: 'Ignored non-message event' });
