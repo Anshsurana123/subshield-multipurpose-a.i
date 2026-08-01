@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+@theme {
+  --color-shield-cyan: #176b4b;
+  --color-shield-emerald: #176b4b;
+  --color-shield-red: #bd3c35;
+  --color-shield-amber: #9b6300;
+  --color-shield-violet: #5f6b67;
+  --color-surface: #f5f6f2;
+  --color-surface-raised: #ffffff;
+  --color-surface-glass: rgba(21, 31, 27, 0.06);
+  --color-surface-dark: #17201c;
+  --font-sans: 'Inter', sans-serif;
+  --font-heading: 'Plus Jakarta Sans', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+@layer base {
+  * {
+    border-color: #e2e6df;
+  }
+
+  html {
+    background: #f5f6f2;
+  }
+
+  body {
+    background: #f5f6f2;
+    color: #17201c;
+  }
+
+  button,
+  input,
+  label {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  label:focus-within {
+    outline: 3px solid rgba(23, 107, 75, 0.25);
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  .bg-mesh {
+    background-color: #f5f6f2;
+    background-image: none;
+  }
+
+  .app-surface {
+    background: #ffffff;
+    border: 1px solid #e2e6df;
+    box-shadow: 0 1px 2px rgba(15, 23, 20, 0.04), 0 10px 30px rgba(15, 23, 20, 0.035);
+  }
+
+  .eyebrow {
+    color: #63716a;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .scrollbar-terminal::-webkit-scrollbar {
+    width: 7px;
+    height: 7px;
+  }
+
+  .scrollbar-terminal::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-terminal::-webkit-scrollbar-thumb {
+    background: #d3d9d2;
+    border-radius: 999px;
+  }
+
+  .scrollbar-terminal::-webkit-scrollbar-thumb:hover {
+    background: #9eaaa2;
+  }
+}
