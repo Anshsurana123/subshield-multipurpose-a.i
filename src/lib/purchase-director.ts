@@ -34,11 +34,13 @@ export interface PurchasePlan {
   merchant: PurchaseMerchant;
   /** Food/grocery items with quantities (empty for product orders). */
   items: PurchaseItem[];
-  /** Product search query, e.g. "gaming mouse" (product orders only). */
+  /** Product search query, e.g. "gaming mouse wireless" (product orders only). */
   productQuery: string;
   /** Optional price constraint, e.g. "within 2000 - 3000" → {min:2000,max:3000}. */
   minPrice: number | null;
   maxPrice: number | null;
+  /** Realistic market estimate when min/max price are absent (e.g. 2499 for perfume). */
+  estimatedPrice: number | null;
   currency: string;
   /** Payment hint the user mentioned (upi/card/cash) — null when unspecified. */
   paymentMethod: 'upi' | 'card' | 'cash' | null;
@@ -79,11 +81,12 @@ const DIRECTOR_SYSTEM = [
   '- For product orders, put a concise, searchable product query in productQuery (e.g. "gaming mouse wireless").',
   '- Do NOT invent items that are not in the message.',
   '',
-  'PRICE RANGE:',
-  '- Parse price constraints like "within 2000 - 3000", "between x and y", "under 2000", "max 1500", "around 500" into minPrice/maxPrice. Use null when absent.',
+  'PRICE RANGE & ESTIMATES:',
+  '- Parse price constraints like "within 2000 - 3000", "between x and y", "under 2000", "max 1500" into minPrice/maxPrice. Use null when absent.',
+  '- If minPrice/maxPrice are absent, provide a realistic typical retail market price estimate for the item in estimatedPrice (e.g. 2499 for perfume, 1800 for gaming mouse, 650 for coffee beans). Never estimate 1 or 0.',
   '',
   'VENDOR URL:',
-  '- For category "product", include vendorUrl: a REAL shopify store product/search URL or an amazon.in search URL for the product (e.g. https://www.amazon.in/s?k=gaming+mouse). Prefer a well-known shopify store domain if you know one; otherwise use the amazon search URL.',
+  '- For category "product", include vendorUrl: a REAL shopify store product/search URL or an amazon.in search URL for the product (e.g. https://www.amazon.in/s?k=rock+smelling+perfume). Prefer a well-known shopify store domain if you know one; otherwise use the amazon search URL.',
   '- For food/grocery, vendorUrl should be null.',
   '',
   'PAYMENT:',
@@ -97,6 +100,7 @@ const DIRECTOR_SYSTEM = [
   '  "productQuery": "...",',
   '  "minPrice": number | null,',
   '  "maxPrice": number | null,',
+  '  "estimatedPrice": number | null,',
   '  "currency": "INR",',
   '  "paymentMethod": "upi" | "card" | "cash" | null,',
   '  "vendorUrl": "... or null",',
@@ -152,6 +156,8 @@ export async function directPurchaseRequest(text: string): Promise<PurchasePlan 
 
     let minPrice = toPrice(data.minPrice);
     let maxPrice = toPrice(data.maxPrice);
+    const estimatedPrice = toPrice(data.estimatedPrice);
+
     if (minPrice != null && maxPrice != null && minPrice > maxPrice) {
       const tmp = minPrice;
       minPrice = maxPrice;
@@ -188,6 +194,7 @@ export async function directPurchaseRequest(text: string): Promise<PurchasePlan 
           : items[0]?.name || '',
       minPrice,
       maxPrice,
+      estimatedPrice,
       currency,
       paymentMethod,
       vendorUrl,

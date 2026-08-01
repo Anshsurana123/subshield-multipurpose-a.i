@@ -115,14 +115,15 @@ async function discoverQuote(plan: PurchasePlan): Promise<UcpQuote | null> {
   }
 }
 
-/** Estimate the session amount when no quote is available (midpoint of range). */
+/** Estimate the session amount when no quote is available. */
 function estimateAmount(plan: PurchasePlan): number {
   if (plan.minPrice != null && plan.maxPrice != null) {
     return Math.round(((plan.minPrice + plan.maxPrice) / 2) * 100) / 100;
   }
   if (plan.maxPrice != null) return plan.maxPrice;
   if (plan.minPrice != null) return plan.minPrice;
-  return 1; // never mint a zero-amount session
+  if (plan.estimatedPrice != null) return plan.estimatedPrice;
+  return plan.currency === 'USD' ? 29.99 : 1499; // Realistic default baseline estimate (e.g. ₹1,499)
 }
 
 /** Price display for the plan (used in replies). */
@@ -130,6 +131,7 @@ function priceLabel(plan: PurchasePlan): string {
   if (plan.minPrice != null && plan.maxPrice != null) return `${plan.minPrice} - ${plan.maxPrice}`;
   if (plan.minPrice != null) return `min ${plan.minPrice}`;
   if (plan.maxPrice != null) return `under ${plan.maxPrice}`;
+  if (plan.estimatedPrice != null) return `~${plan.estimatedPrice}`;
   return 'best price';
 }
 
@@ -143,8 +145,8 @@ export async function orderProductFromChat(plan: PurchasePlan, ctx: FoodOrderCon
 
   const amount = quote?.finalPrice?.amount ?? estimateAmount(plan);
   const currency = quote?.finalPrice?.currency || plan.currency || 'INR';
-  const vendorName = quote?.merchant || hostOf(plan.vendorUrl).split('.')[0] || 'Shopify Store';
-  const vendorDomain = hostOf(plan.vendorUrl);
+  const vendorName = quote?.merchant || (plan.vendorUrl ? hostOf(plan.vendorUrl).split('.')[0] : (plan.merchant === 'amazon' ? 'Amazon' : 'Shopify Store'));
+  const vendorDomain = plan.vendorUrl ? hostOf(plan.vendorUrl) : (plan.merchant === 'amazon' ? 'amazon.in' : 'shopify.com');
 
   try {
     const session = await pravaClient.createMandateSession({
