@@ -53,7 +53,11 @@ export async function sendTelegramMessage(chatId: string | number, text: string)
  * Send a message to a Linq chat via the Linq Partner API v3.
  * Docs: POST /v3/chats/{chatId}/messages with parts array.
  */
-export async function sendLinqMessage(chatId: string, text: string): Promise<boolean> {
+export async function sendLinqMessage(
+  chatId: string,
+  text: string,
+  fromNumber: string = '+12134155394'
+): Promise<boolean> {
   const apiKey = process.env.LINQ_API_KEY;
   if (!apiKey) {
     console.warn('[ChatSenders] LINQ_API_KEY missing in environment variables.');
@@ -61,8 +65,35 @@ export async function sendLinqMessage(chatId: string, text: string): Promise<boo
   }
 
   try {
+    const trimmedId = (chatId || '').trim();
+    const isPhoneNumber = /^\+?\d{10,15}$/.test(trimmedId);
+
+    // Endpoint A: Direct phone number routing via POST /v3/chats
+    if (isPhoneNumber) {
+      const res = await fetch('https://api.linqapp.com/api/partner/v3/chats', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          from: fromNumber,
+          to: [trimmedId],
+          message: {
+            parts: [{ type: 'text', value: text }],
+          },
+        }),
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error(`[ChatSenders] Linq POST /v3/chats failed (${res.status}): ${errText}`);
+      }
+      return res.ok;
+    }
+
+    // Endpoint B: Existing chat ID routing via POST /v3/chats/{chatId}/messages
     const res = await fetch(
-      `https://api.linqapp.com/api/partner/v3/chats/${encodeURIComponent(chatId)}/messages`,
+      `https://api.linqapp.com/api/partner/v3/chats/${encodeURIComponent(trimmedId)}/messages`,
       {
         method: 'POST',
         headers: {
@@ -76,11 +107,27 @@ export async function sendLinqMessage(chatId: string, text: string): Promise<boo
         }),
       }
     );
-    if (!res.ok) {
-      const errText = await res.text();
-      console.error(`[ChatSenders] Linq sendMessage failed (${res.status}): ${errText}`);
-    }
-    return res.ok;
+    if (res.ok) return true;
+
+    const errText = await res.text();
+    console.error(`[ChatSenders] Linq sendMessage failed (${res.status}): ${errText}. Attempting POST /v3/chats fallback...`);
+
+    // Fallback attempt via POST /v3/chats
+    const fallbackRes = await fetch('https://api.linqapp.com/api/partner/v3/chats', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        from: fromNumber,
+        to: [trimmedId],
+        message: {
+          parts: [{ type: 'text', value: text }],
+        },
+      }),
+    });
+    return fallbackRes.ok;
   } catch (err) {
     console.error('[ChatSenders] Linq sendMessage error:', err);
     return false;
