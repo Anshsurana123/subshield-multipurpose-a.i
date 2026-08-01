@@ -180,7 +180,6 @@ export async function parseFoodOrderItems(text: string): Promise<FoodOrderItem[]
   try {
     const res = await openai.chat.completions.create({
       model: process.env.OPENAI_MODEL || 'gpt-5.6-luna',
-      temperature: 0,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: system },
@@ -284,7 +283,6 @@ export async function normalizeFoodItems(items: FoodOrderItem[]): Promise<FoodOr
   try {
     const res = await openai.chat.completions.create({
       model: process.env.OPENAI_MODEL || 'gpt-5.6-luna',
-      temperature: 0,
       response_format: { type: 'json_object' },
       messages: [
         {
