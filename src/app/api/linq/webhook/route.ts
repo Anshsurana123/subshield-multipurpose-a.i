@@ -28,23 +28,34 @@ export async function POST(request: Request) {
     const body = JSON.parse(rawBody);
     console.log('[Linq Webhook] Received event:', redactPII(JSON.stringify(body)).slice(0, 1000));
 
-    // Defensive payload parsing — Linq may nest the message under `message`,
-    // `data.message`, or flatten `text`/`chat_id`. Accept the common shapes.
-    const message = body?.message ?? body?.data?.message ?? body;
-    // Coerce to string defensively — some messaging APIs send `content` as an object.
-    const text: string = String(
-      message?.text ??
-      message?.content ??
-      body?.data?.text ??
-      body?.text ??
-      ''
-    );
+    // Defensive payload parsing — Linq v3 sends structured messages with a `parts`
+    // array (e.g. [{ type: "text", value: "..." }]), or flat `text`/`content`.
+    const message = body?.message ?? body?.data?.message ?? body?.data ?? body;
+
+    let text = '';
+    const rawParts = message?.parts || body?.data?.parts || body?.parts;
+    if (Array.isArray(rawParts) && rawParts.length > 0) {
+      text = rawParts.map((p: any) => p?.value || p?.text || '').filter(Boolean).join(' ');
+    }
+    if (!text) {
+      text = String(
+        message?.text ??
+        message?.content ??
+        body?.data?.text ??
+        body?.text ??
+        ''
+      );
+    }
+
     const chatId: string | undefined =
       message?.chat?.id ||
       message?.chatId ||
       message?.chat_id ||
+      body?.data?.chat_id ||
+      body?.data?.chatId ||
       body?.chat_id ||
-      body?.chatId;
+      body?.chatId ||
+      body?.chat?.id;
 
     const eventType = body?.event || body?.type || body?.event_type;
 
@@ -53,8 +64,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'No chat id' }, { status: 400 });
     }
 
-    // Only handle incoming text messages; ignore delivery receipts etc.
-    if (!text || (eventType && !String(eventType).includes('message.received'))) {
+    // Only handle incoming text messages; ignore delivery receipts, typing indicators etc.
+    if (!text || (eventType && !String(eventType).includes('message.received') && !String(eventType).includes('message.created'))) {
       return NextResponse.json({ success: true, message: 'Ignored non-message event' });
     }
 

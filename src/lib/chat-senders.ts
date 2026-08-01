@@ -5,10 +5,13 @@ import type { ChatChannel } from './types';
  */
 export async function sendTelegramMessage(chatId: string | number, text: string): Promise<boolean> {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
-  if (!botToken) return false;
+  if (!botToken) {
+    console.warn('[ChatSenders] TELEGRAM_BOT_TOKEN missing in environment variables.');
+    return false;
+  }
 
   try {
-    const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    let res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -18,10 +21,27 @@ export async function sendTelegramMessage(chatId: string | number, text: string)
         disable_web_page_preview: false,
       }),
     });
+
+    if (res.ok) return true;
+
+    const errText = await res.text();
+    console.warn(`[ChatSenders] Telegram sendMessage with Markdown failed (${res.status}): ${errText}. Retrying without parse_mode...`);
+
+    res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        disable_web_page_preview: false,
+      }),
+    });
+
     if (!res.ok) {
-      const errText = await res.text();
-      console.error(`[ChatSenders] Telegram sendMessage failed (${res.status}): ${errText}`);
+      const fallbackErr = await res.text();
+      console.error(`[ChatSenders] Telegram sendMessage plain text fallback failed (${res.status}): ${fallbackErr}`);
     }
+
     return res.ok;
   } catch (err) {
     console.error('[ChatSenders] Telegram sendMessage error:', err);
@@ -35,7 +55,10 @@ export async function sendTelegramMessage(chatId: string | number, text: string)
  */
 export async function sendLinqMessage(chatId: string, text: string): Promise<boolean> {
   const apiKey = process.env.LINQ_API_KEY;
-  if (!apiKey) return false;
+  if (!apiKey) {
+    console.warn('[ChatSenders] LINQ_API_KEY missing in environment variables.');
+    return false;
+  }
 
   try {
     const res = await fetch(
