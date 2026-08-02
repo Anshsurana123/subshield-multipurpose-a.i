@@ -58,57 +58,14 @@ export async function createSteelSession(
     ...(options.proxy || process.env.STEEL_PROXY_URL
       ? { proxyUrl: options.proxy || process.env.STEEL_PROXY_URL }
       : {}),
-    ...(options.country || process.env.STEEL_COUNTRY
-      ? {
-          useProxy: {
-            geolocation: {
-              country: (options.country || process.env.STEEL_COUNTRY || 'US').toUpperCase() as any,
-            },
-          },
-        }
+    ...(options.stealth
+      ? { stealthConfig: { humanizeInteractions: true } }
       : {}),
-    ...(options.stealth ?? process.env.STEEL_STEALTH === '1'
-      ? {
-          stealthConfig: {
-            humanizeInteractions: true,
-            ...(options.solveCaptcha ?? process.env.STEEL_SOLVE_CAPTCHA === '1'
-              ? { autoCaptchaSolving: true }
-              : {}),
-          },
-        }
-      : options.solveCaptcha ?? process.env.STEEL_SOLVE_CAPTCHA === '1'
-        ? { solveCaptcha: true }
-        : {}),
     ...(options.userAgent ? { userAgent: options.userAgent } : {}),
     ...(options.viewport ? { dimensions: options.viewport } : {}),
   };
 
-  let session: Steel.Session;
-  try {
-    session = await client.sessions.create(sessionParams);
-  } catch (err: any) {
-    if (
-      err?.status === 403 ||
-      (err?.message && String(err.message).includes('10 in paid balance'))
-    ) {
-      console.warn(
-        '[Steel Client] Steel API requires $10 paid balance for built-in proxies/CAPTCHA solving. Retrying session without built-in proxies/CAPTCHA...'
-      );
-      const fallbackParams: Steel.SessionCreateParams = {
-        ...(options.proxy || process.env.STEEL_PROXY_URL
-          ? { proxyUrl: options.proxy || process.env.STEEL_PROXY_URL }
-          : {}),
-        ...(options.stealth ?? process.env.STEEL_STEALTH === '1'
-          ? { stealthConfig: { humanizeInteractions: true } }
-          : {}),
-        ...(options.userAgent ? { userAgent: options.userAgent } : {}),
-        ...(options.viewport ? { dimensions: options.viewport } : {}),
-      };
-      session = await client.sessions.create(fallbackParams);
-    } else {
-      throw err;
-    }
-  }
+  const session = await client.sessions.create(sessionParams);
 
   let browser: Browser | null = null;
   try {
