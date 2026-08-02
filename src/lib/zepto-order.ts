@@ -68,19 +68,38 @@ interface ZeptoPendingOrder {
   createdAt: number;
 }
 
-// Per-chat pending orders (in-memory — lost on serverless cold start, which is
-// acceptable for the sandbox ask → answer round trip).
-const pendingOrders = new Map<string, ZeptoPendingOrder>();
-const PENDING_TTL_MS = 20 * 60 * 1000;
+import { saveDurablePendingOrder, getDurablePendingOrder, deleteDurablePendingOrder } from './persistent-orders';
 
-function getPendingOrder(chatId: string): ZeptoPendingOrder | null {
+// Per-chat pending orders (in-memory cache + Supabase persistent fallback)
+const pendingOrders = new Map<string, ZeptoPendingOrder>();
+const PENDING_TTL_MS = 30 * 60 * 1000;
+
+async function getPendingOrder(chatId: string): Promise<ZeptoPendingOrder | null> {
   const p = pendingOrders.get(chatId);
-  if (!p) return null;
-  if (Date.now() - p.createdAt > PENDING_TTL_MS) {
+  if (p) {
+    if (Date.now() - p.createdAt <= PENDING_TTL_MS) {
+      return p;
+    }
     pendingOrders.delete(chatId);
+    await deleteDurablePendingOrder(chatId, 'grocery');
     return null;
   }
-  return p;
+  const durable = await getDurablePendingOrder<ZeptoPendingOrder>(chatId, 'grocery');
+  if (durable) {
+    pendingOrders.set(chatId, durable);
+    return durable;
+  }
+  return null;
+}
+
+async function savePendingOrder(chatId: string, order: ZeptoPendingOrder): Promise<void> {
+  pendingOrders.set(chatId, order);
+  await saveDurablePendingOrder(chatId, 'grocery', order);
+}
+
+async function removePendingOrder(chatId: string): Promise<void> {
+  pendingOrders.delete(chatId);
+  await deleteDurablePendingOrder(chatId, 'grocery');
 }
 
 /** Is the Zepto account registered? (text-based check on get_user_details) */
@@ -260,7 +279,7 @@ async function startPravaForZepto(p: ZeptoPendingOrder): Promise<string> {
     p.method = 'card';
     p.pravaSessionId = session.sessionId;
     p.paymentLink = session.iframeUrl;
-    pendingOrders.set(p.ctx.chatId, p);
+    await savePendingOrder(p.ctx.chatId, p);
 
     const totalNote = total > 0 ? `💰 *Total*: ₹${total.toLocaleString('en-IN')}\n` : '';
     return (
@@ -287,13 +306,13 @@ async function startPravaForZepto(p: ZeptoPendingOrder): Promise<string> {
  * Returns null when the message is NOT an answer to a pending Zepto order.
  */
 export async function resolvePendingZeptoOrder(chatId: string, text: string): Promise<string | null> {
-  const pending = getPendingOrder(chatId);
+  const pending = await getPendingOrder(chatId);
   if (!pending) return null;
 
   const t = text.trim().toLowerCase();
 
   if (/^\s*(?:cancel|never mind|forget|drop it|nevermind)[.!]*\s*$/i.test(t)) {
-    pendingOrders.delete(chatId);
+    await removePendingOrder(chatId);
     return `🚫 Zepto order cancelled.`;
   }
 
@@ -306,13 +325,13 @@ export async function resolvePendingZeptoOrder(chatId: string, text: string): Pr
     if (!reg.ok) return reg.text;
     // Registered — re-run the resolution with the stored order text.
     pending.awaitingName = false;
-    pendingOrders.set(chatId, pending);
+    await savePendingOrder(chatId, pending);
     const resolved = await resolveZeptoOrderFromItems(pending.ctx, pending.items);
     if (typeof resolved === 'string') {
-      pendingOrders.delete(chatId);
+      await removePendingOrder(chatId);
       return resolved;
     }
-    pendingOrders.set(chatId, resolved);
+    await savePendingOrder(chatId, resolved);
     return askPaymentMethodReply(resolved);
   }
 
@@ -330,7 +349,7 @@ export async function resolvePendingZeptoOrder(chatId: string, text: string): Pr
       }
 
       if (status === 'failed') {
-        pendingOrders.delete(chatId);
+        await removePendingOrder(chatId);
         return `❌ *Prava payment failed.*\n\nYour order was not placed. Reply with the order again, or choose **cash**/**upi** instead.`;
       }
       if (status !== 'awaiting_result' && status !== 'completed') {
@@ -359,7 +378,7 @@ export async function resolvePendingZeptoOrder(chatId: string, text: string): Pr
         console.warn('[ZeptoOrder] Failed to report Prava transaction status:', reportErr);
       }
 
-      if (placed.ok) pendingOrders.delete(chatId);
+      if (placed.ok) await removePendingOrder(chatId);
       return `✅ *Prava payment approved!* Placing your Zepto order now…\n\n${placed.text}`;
     }
 
@@ -369,13 +388,13 @@ export async function resolvePendingZeptoOrder(chatId: string, text: string): Pr
     if (switchMethod === 'cash') {
       pending.method = null;
       const reply = await placeZeptoOrder(pending, 'cash', 'Cash (COD)');
-      if (reply.ok) pendingOrders.delete(chatId);
+      if (reply.ok) await removePendingOrder(chatId);
       return reply.text;
     }
     if (switchMethod === 'upi') {
       pending.method = null;
       const reply = await placeZeptoOrder(pending, 'upi', 'UPI');
-      if (reply.ok) pendingOrders.delete(chatId);
+      if (reply.ok) await removePendingOrder(chatId);
       return reply.text;
     }
     return null;
@@ -385,12 +404,12 @@ export async function resolvePendingZeptoOrder(chatId: string, text: string): Pr
   const method = detectPaymentMethod(t);
   if (method === 'cash') {
     const reply = await placeZeptoOrder(pending, 'cash', 'Cash (COD)');
-    if (reply.ok) pendingOrders.delete(chatId);
+    if (reply.ok) await removePendingOrder(chatId);
     return reply.text;
   }
   if (method === 'upi') {
     const reply = await placeZeptoOrder(pending, 'upi', 'UPI');
-    if (reply.ok) pendingOrders.delete(chatId);
+    if (reply.ok) await removePendingOrder(chatId);
     return reply.text;
   }
   if (method === 'card') {
@@ -500,7 +519,7 @@ export async function orderZeptoFromChat(
 
   // Registration first — Zepto won't serve any tool until the account is set up.
   if (!(await isRegistered())) {
-    pendingOrders.set(ctx.chatId, {
+    await savePendingOrder(ctx.chatId, {
       ctx,
       items,
       addressId: '',
@@ -528,7 +547,7 @@ export async function orderZeptoFromChat(
   }
 
   // Unspecified → park the order and ask.
-  pendingOrders.set(ctx.chatId, resolved);
+  await savePendingOrder(ctx.chatId, resolved);
   return askPaymentMethodReply(resolved);
 }
 

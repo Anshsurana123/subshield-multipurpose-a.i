@@ -85,20 +85,39 @@ interface PendingOrder {
   createdAt: number;
 }
 
-// Per-chat pending orders (in-memory — lost on serverless cold start, which is
-// acceptable for the sandbox ask → answer round trip).
-const pendingOrders = new Map<string, PendingOrder>();
-const PENDING_TTL_MS = 20 * 60 * 1000;
+import { saveDurablePendingOrder, getDurablePendingOrder, deleteDurablePendingOrder } from './persistent-orders';
 
-/** Fetch a chat's pending order, evicting it if the TTL has lapsed. */
-function getPendingOrder(chatId: string): PendingOrder | null {
+// Per-chat pending orders (in-memory cache + Supabase persistent fallback)
+const pendingOrders = new Map<string, PendingOrder>();
+const PENDING_TTL_MS = 30 * 60 * 1000;
+
+/** Fetch a chat's pending order from memory or Supabase, evicting if TTL lapsed. */
+async function getPendingOrder(chatId: string): Promise<PendingOrder | null> {
   const p = pendingOrders.get(chatId);
-  if (!p) return null;
-  if (Date.now() - p.createdAt > PENDING_TTL_MS) {
+  if (p) {
+    if (Date.now() - p.createdAt <= PENDING_TTL_MS) {
+      return p;
+    }
     pendingOrders.delete(chatId);
+    await deleteDurablePendingOrder(chatId, 'food');
     return null;
   }
-  return p;
+  const durable = await getDurablePendingOrder<PendingOrder>(chatId, 'food');
+  if (durable) {
+    pendingOrders.set(chatId, durable);
+    return durable;
+  }
+  return null;
+}
+
+async function savePendingOrder(chatId: string, order: PendingOrder): Promise<void> {
+  pendingOrders.set(chatId, order);
+  await saveDurablePendingOrder(chatId, 'food', order);
+}
+
+async function removePendingOrder(chatId: string): Promise<void> {
+  pendingOrders.delete(chatId);
+  await deleteDurablePendingOrder(chatId, 'food');
 }
 
 // Chain budget: up to ~7 sequential calls must fit the 60s serverless
@@ -578,7 +597,7 @@ async function startPravaForFood(p: PendingOrder): Promise<string> {
     p.method = 'card';
     p.pravaSessionId = session.sessionId;
     p.paymentLink = session.iframeUrl;
-    pendingOrders.set(p.ctx.chatId, p);
+    await savePendingOrder(p.ctx.chatId, p);
 
     const totalNote = total > 0 ? `💰 *Total*: ₹${total.toLocaleString('en-IN')}\n` : '';
     return (
@@ -611,7 +630,7 @@ export const ANSWER_RE = /^\s*(?:cash|cod|card|upi|done|approved|paid|placed|go 
 export const FINALIZE_RE = /^\s*(?:done|approved|paid|placed|go ahead)[.!]*\s*$/i;
 
 export async function resolvePendingFoodOrder(chatId: string, text: string): Promise<string | null> {
-  const pending = getPendingOrder(chatId);
+  const pending = await getPendingOrder(chatId);
 
   // No pending food order on record — return null so the OTHER engines
   // (Zepto / product) get a chance to resolve their own pending orders.
@@ -622,7 +641,7 @@ export async function resolvePendingFoodOrder(chatId: string, text: string): Pro
   const t = text.trim().toLowerCase();
 
   if (/^\s*(?:cancel|never mind|forget|drop it|nevermind)[.!]*\s*$/i.test(t)) {
-    pendingOrders.delete(chatId);
+    await removePendingOrder(chatId);
     return `🚫 Order cancelled.`;
   }
 
@@ -644,7 +663,7 @@ export async function resolvePendingFoodOrder(chatId: string, text: string): Pro
       }
 
       if (status === 'failed') {
-        pendingOrders.delete(chatId);
+        await removePendingOrder(chatId);
         return `❌ *Prava payment failed.*\n\nYour order was not placed. Reply with the order again, or choose **cash** instead.`;
       }
       if (status !== 'awaiting_result' && status !== 'completed') {
@@ -668,7 +687,7 @@ export async function resolvePendingFoodOrder(chatId: string, text: string): Pro
       const credData = extractOneTimeCredential(raw);
 
       if (!credData) {
-        pendingOrders.delete(chatId);
+        await removePendingOrder(chatId);
         return `❌ *Prava payment credential unavailable.*\n\nCould not extract one-time card credentials for session \`${sessionId}\`. Order was not placed on Swiggy.`;
       }
 
@@ -696,7 +715,7 @@ export async function resolvePendingFoodOrder(chatId: string, text: string): Pro
       }
 
       if (isApproved) {
-        pendingOrders.delete(chatId);
+        await removePendingOrder(chatId);
         return (
           `✅ *Swiggy card order placed successfully via Prava!*\n\n` +
           `🏪 *Restaurant*: ${pending.restaurant.name}\n` +
@@ -721,13 +740,13 @@ export async function resolvePendingFoodOrder(chatId: string, text: string): Pro
     if (switchMethod === 'cash') {
       pending.method = null; // reset so placeFoodOrderCod doesn't see 'card'
       const reply = await placeFoodOrderCod(pending);
-      if (reply.ok) pendingOrders.delete(chatId);
+      if (reply.ok) await removePendingOrder(chatId);
       return reply.text;
     }
     if (switchMethod === 'upi') {
       pending.method = null;
       const reply = await placeFoodOrderCod(pending, 'UPI', 'UPI');
-      if (reply.ok) pendingOrders.delete(chatId);
+      if (reply.ok) await removePendingOrder(chatId);
       return reply.text;
     }
     return null;
@@ -739,12 +758,12 @@ export async function resolvePendingFoodOrder(chatId: string, text: string): Pro
     const reply = await placeFoodOrderCod(pending);
     // Only drop the pending entry on a confirmed placement — a sandbox
     // merchant error should leave it retryable (or switchable to upi/card).
-    if (reply.ok) pendingOrders.delete(chatId);
+    if (reply.ok) await removePendingOrder(chatId);
     return reply.text;
   }
   if (method === 'upi') {
     const reply = await placeFoodOrderCod(pending, 'UPI', 'UPI');
-    if (reply.ok) pendingOrders.delete(chatId);
+    if (reply.ok) await removePendingOrder(chatId);
     return reply.text;
   }
   if (method === 'card') {
@@ -781,7 +800,7 @@ export async function orderFoodFromChat(
   }
 
   // Unspecified → park the order and ask.
-  pendingOrders.set(ctx.chatId, resolved);
+  await savePendingOrder(ctx.chatId, resolved);
   return askPaymentMethodReply(resolved);
 }
 

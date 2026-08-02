@@ -51,17 +51,37 @@ interface PendingProductOrder {
   createdAt: number;
 }
 
-const pendingOrders = new Map<string, PendingProductOrder>();
-const PENDING_TTL_MS = 20 * 60 * 1000;
+import { saveDurablePendingOrder, getDurablePendingOrder, deleteDurablePendingOrder } from './persistent-orders';
 
-function getPendingOrder(chatId: string): PendingProductOrder | null {
+const pendingOrders = new Map<string, PendingProductOrder>();
+const PENDING_TTL_MS = 30 * 60 * 1000;
+
+async function getPendingOrder(chatId: string): Promise<PendingProductOrder | null> {
   const p = pendingOrders.get(chatId);
-  if (!p) return null;
-  if (Date.now() - p.createdAt > PENDING_TTL_MS) {
+  if (p) {
+    if (Date.now() - p.createdAt <= PENDING_TTL_MS) {
+      return p;
+    }
     pendingOrders.delete(chatId);
+    await deleteDurablePendingOrder(chatId, 'product');
     return null;
   }
-  return p;
+  const durable = await getDurablePendingOrder<PendingProductOrder>(chatId, 'product');
+  if (durable) {
+    pendingOrders.set(chatId, durable);
+    return durable;
+  }
+  return null;
+}
+
+async function savePendingOrder(chatId: string, order: PendingProductOrder): Promise<void> {
+  pendingOrders.set(chatId, order);
+  await saveDurablePendingOrder(chatId, 'product', order);
+}
+
+async function removePendingOrder(chatId: string): Promise<void> {
+  pendingOrders.delete(chatId);
+  await deleteDurablePendingOrder(chatId, 'product');
 }
 
 /** Host of a URL (without www) for the Prava merchant domain field. */
@@ -171,7 +191,7 @@ export async function orderProductFromChat(plan: PurchasePlan, ctx: FoodOrderCon
       paymentLink: session.iframeUrl,
       createdAt: Date.now(),
     };
-    pendingOrders.set(ctx.chatId, pending);
+    await savePendingOrder(ctx.chatId, pending);
 
     const lines = [
       `🛍️ *Product order — ready for secure payment*`,
@@ -202,13 +222,13 @@ export async function orderProductFromChat(plan: PurchasePlan, ctx: FoodOrderCon
  * Returns null when the message is NOT an answer to a pending product order.
  */
 export async function resolvePendingProductOrder(chatId: string, text: string): Promise<string | null> {
-  const pending = getPendingOrder(chatId);
+  const pending = await getPendingOrder(chatId);
   if (!pending) return null;
 
   const t = text.trim().toLowerCase();
 
   if (/^\s*(?:cancel|never mind|forget|drop it|nevermind)[.!]*\s*$/i.test(t)) {
-    pendingOrders.delete(chatId);
+    await removePendingOrder(chatId);
     return `🚫 Product order cancelled.`;
   }
 
@@ -230,7 +250,7 @@ export async function resolvePendingProductOrder(chatId: string, text: string): 
   }
 
   if (status === 'failed') {
-    pendingOrders.delete(chatId);
+    await removePendingOrder(chatId);
     return `❌ *Prava payment failed.*\n\nYour product order was not placed. Say the order again to retry.`;
   }
   if (status !== 'awaiting_result' && status !== 'completed') {
@@ -263,7 +283,7 @@ export async function resolvePendingProductOrder(chatId: string, text: string): 
         authorizationCode: harness.orderReference || 'AUTHOK',
         responseCode: '00',
       }).catch((e) => console.warn('[ProductOrder] report APPROVED failed:', e));
-      pendingOrders.delete(chatId);
+      await removePendingOrder(chatId);
       return `✅ *Prava payment approved & merchant checkout completed!*\n\n${harness.detail}${harness.orderReference ? `\n🧾 ${harness.orderReference}` : ''}`;
     }
     // Harness failed — report DECLINED so Prava closes the session honestly.
@@ -273,7 +293,7 @@ export async function resolvePendingProductOrder(chatId: string, text: string): 
       amountPaid: cred.amount || pending.amount.toFixed(2),
       responseCode: '05',
     }).catch((e) => console.warn('[ProductOrder] report DECLINED failed:', e));
-    pendingOrders.delete(chatId);
+    await removePendingOrder(chatId);
     return `⚠️ *Prava payment approved, but the merchant checkout didn't complete.*\n\n${harness.detail}\n\nYour card was NOT charged on the merchant side. Try the order again.`;
   }
 
@@ -291,7 +311,7 @@ export async function resolvePendingProductOrder(chatId: string, text: string): 
         authorizationCode: outcome.orderReference || 'AUTHOK',
         responseCode: '00',
       }).catch((e) => console.warn('[ProductOrder] report APPROVED failed:', e));
-      pendingOrders.delete(chatId);
+      await removePendingOrder(chatId);
       return `✅ *Prava payment approved & order placed!*\n\n${outcome.detail}${outcome.orderReference ? `\n🧾 ${outcome.orderReference}` : ''}`;
     }
     await pravaClient.reportTransactionStatus(sessionId, {
@@ -300,7 +320,7 @@ export async function resolvePendingProductOrder(chatId: string, text: string): 
       amountPaid: cred.amount || pending.amount.toFixed(2),
       responseCode: '05',
     }).catch((e) => console.warn('[ProductOrder] report DECLINED failed:', e));
-    pendingOrders.delete(chatId);
+    await removePendingOrder(chatId);
     return `⚠️ *Prava payment approved, but the merchant rejected the checkout.*\n\n${outcome.detail}`;
   }
 
@@ -308,7 +328,7 @@ export async function resolvePendingProductOrder(chatId: string, text: string): 
   // Keep the pending entry alive so the user can reply "done" again once
   // merchant execution gets configured — approval already happened on Prava.
   pending.approvedAt = Date.now();
-  pendingOrders.set(chatId, pending);
+  await savePendingOrder(chatId, pending);
   return (
     `✅ *Prava payment approved!*\n\n` +
     `💰 *Amount*: ${pending.currency} ${pending.amount.toFixed(2)}\n` +
