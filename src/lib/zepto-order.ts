@@ -16,9 +16,10 @@
  * Payment method branch (mirrors the Swiggy food engine):
  *   * cash → create_order (COD)
  *   * upi  → create_upi_reserve_pay_order (NPCI/Razorpay UPI Reserve Pay)
- *   * card → Prava mandate session + 🔒 secure payment link; the user approves
- *            there (card never touches chat), then replies "done" and we
- *            finalize via create_online_payment_order.
+ *   * card → Prava mandate approval → Steel web checkout using the same
+ *            authenticated Zepto account. The generic MCP
+ *            create_online_payment_order tool is not used for Prava cards,
+ *            because it does not receive the Prava credential.
  *
  * Sandbox reality: real orders on the user's Zepto account. A merchant error
  * at any step is expected until production credentials/addresses are fully
@@ -192,6 +193,16 @@ async function placeZeptoOrder(
   kind: 'cash' | 'upi' | 'card',
   paymentLabel: string
 ): Promise<{ ok: boolean; text: string }> {
+  if (kind === 'card') {
+    return {
+      ok: false,
+      text:
+        `💳 Zepto's current MCP online-payment tool does not accept Prava's tokenized card credential. ` +
+        `I won't place an order with a different saved card or claim that Prava paid it. ` +
+        `Use **cash**/**upi**, or configure a Zepto MCP card tool that declares token, CVV, and expiry inputs.`,
+    };
+  }
+
   // Safety gate: don't place REAL-money orders unless explicitly enabled.
   if (process.env.ZEPTO_AUTO_ORDER !== '1') {
     return {
@@ -212,11 +223,11 @@ async function placeZeptoOrder(
     return { ok: false, text: `💳 Couldn't fetch Zepto payment methods: ${payRes.error}\n\nItems are in your Zepto cart — finish manually if you'd like.` };
   }
   const payText = payRes.text || '';
-  const wanted = kind === 'upi' ? /upi/i : kind === 'card' ? /online|card|upi/i : /cod|cash/i;
+  const wanted = kind === 'upi' ? /upi/i : /cod|cash/i;
   if (!wanted.test(payText)) {
     return {
       ok: false,
-      text: `💳 ${kind === 'upi' ? 'UPI' : kind === 'card' ? 'Online/card' : 'Cash-on-delivery'} doesn't look available at Zepto for this cart.\n\nAvailable: ${payText.slice(0, 300)}\n\nItems are in your Zepto cart — pick another method or finish manually.`,
+      text: `💳 ${kind === 'upi' ? 'UPI' : 'Cash-on-delivery'} doesn't look available at Zepto for this cart.\n\nAvailable: ${payText.slice(0, 300)}\n\nItems are in your Zepto cart — pick another method or finish manually.`,
     };
   }
 
@@ -230,7 +241,7 @@ async function placeZeptoOrder(
   // COD / UPI / online each have their own order tool; the preview step
   // (confirmOrder:false) is skipped since the user already confirmed the cart
   // by choosing a payment method here.
-  const tool = kind === 'upi' ? 'create_upi_reserve_pay_order' : kind === 'card' ? 'create_online_payment_order' : 'create_order';
+  const tool = kind === 'upi' ? 'create_upi_reserve_pay_order' : 'create_order';
   const res = await callMcpTool(ZEPTO, tool, commonArgs);
 
   const orderRef = res.ok
@@ -261,10 +272,10 @@ async function placeZeptoOrder(
   };
 }
 
-/** Card path: create a Prava mandate session and return the secure link reply. */
+/** Card path: create a Prava mandate session and return the secure link. */
 async function startPravaForZepto(p: ZeptoPendingOrder): Promise<string> {
   const total = orderTotal(p.cartLines);
-  const safeTotal = total > 0 ? total : 1; // never mint a zero-amount session
+  const safeTotal = total > 0 ? total : 1;
   try {
     const session = await pravaClient.createMandateSession({
       userId: p.ctx.userId,
@@ -281,14 +292,13 @@ async function startPravaForZepto(p: ZeptoPendingOrder): Promise<string> {
     p.paymentLink = session.iframeUrl;
     await savePendingOrder(p.ctx.chatId, p);
 
-    const totalNote = total > 0 ? `💰 *Total*: ₹${total.toLocaleString('en-IN')}\n` : '';
     return (
       `💳 *Pay by card via Prava — secure link*\n\n` +
       `🛒 *Store*: Zepto\n` +
       `📦 *Items*:\n${cartLinesText(p.cartLines)}\n` +
-      `${totalNote}\n` +
+      `${total > 0 ? `💰 *Total*: ₹${total.toLocaleString('en-IN')}\n` : ''}\n` +
       `🔒 Approve the payment here (your card stays in Prava's vault — never in chat):\n${session.iframeUrl}\n\n` +
-      `Once you've approved, reply **done** and I'll place your order.`
+      `Once you've approved, reply **done** and I'll open the Steel Zepto checkout.`
     );
   } catch (err: any) {
     return `❌ Couldn't start the Prava payment: ${err?.message || err}\n\nYou can still reply **cash** or **upi** instead.`;
@@ -352,34 +362,56 @@ export async function resolvePendingZeptoOrder(chatId: string, text: string): Pr
         await removePendingOrder(chatId);
         return `❌ *Prava payment failed.*\n\nYour order was not placed. Reply with the order again, or choose **cash**/**upi** instead.`;
       }
-      if (status !== 'awaiting_result' && status !== 'completed') {
+      if (status === 'completed') {
+        await removePendingOrder(chatId);
+        return `✅ *Prava already completed this payment.*\n\nI won't retry the card charge. Check your Zepto orders for the result.`;
+      }
+      if (status !== 'awaiting_result') {
         return `⏳ I haven't seen your Prava approval yet. Open the secure link and approve it, then reply **done** again.`;
       }
 
-      const placed = await placeZeptoOrder(pending, 'card', 'Prava card (approved)');
+      const { extractOneTimeCredential } = await import('./auto-buy');
+      const { executeZeptoWebCheckout } = await import('./merchant-executor');
+      let raw: any = null;
+      try {
+        raw = await pravaClient.fetchRawPaymentResultForExecutor(sessionId);
+      } catch (err) {
+        console.warn('[ZeptoOrder] Failed to fetch raw Prava payment result:', err);
+      }
+      const credData = extractOneTimeCredential(raw);
+      if (!credData) {
+        await removePendingOrder(chatId);
+        return `❌ *Prava payment credential unavailable.*\n\nZepto was not charged. The order was not placed.`;
+      }
+
+      let placed;
+      try {
+        placed = await executeZeptoWebCheckout(credData.credential, { amount: orderTotal(pending.cartLines) });
+      } catch (error: any) {
+        placed = {
+          status: 'failed' as const,
+          detail: `Steel checkout threw: ${error?.message || String(error)}`,
+        };
+      }
 
       // Report transaction outcome to Prava so the session is properly closed
       // and the one-time credential is consumed (mirrors auto-buy.ts behavior).
       try {
-        const raw = await pravaClient.fetchRawPaymentResultForExecutor(sessionId);
-        const txn = raw?.transactions?.[0];
-        const item = txn?.line_items?.[0] || raw?.line_items?.[0];
-        const txnRefId = item?.txn_ref_id || item?.txnRefId || '';
-        if (txnRefId) {
-          await pravaClient.reportTransactionStatus(sessionId, {
-            txnRefId,
-            txnStatus: placed.ok ? 'APPROVED' : 'DECLINED',
-            amountPaid: item?.total_amount || item?.totalAmount || String(orderTotal(pending.cartLines)),
-            authorizationCode: placed.ok ? 'CHAT_ORDER_OK' : undefined,
-            responseCode: placed.ok ? '00' : '05',
-          });
-        }
+        await pravaClient.reportTransactionStatus(sessionId, {
+          txnRefId: credData.txnRefId,
+          txnStatus: placed.status === 'approved' ? 'APPROVED' : 'DECLINED',
+          amountPaid: credData.amount || String(orderTotal(pending.cartLines)),
+          authorizationCode: placed.status === 'approved' ? 'ZEPTO_STEEL_OK' : undefined,
+          responseCode: placed.status === 'approved' ? '00' : '05',
+        });
       } catch (reportErr) {
         console.warn('[ZeptoOrder] Failed to report Prava transaction status:', reportErr);
       }
 
-      if (placed.ok) await removePendingOrder(chatId);
-      return `✅ *Prava payment approved!* Placing your Zepto order now…\n\n${placed.text}`;
+      await removePendingOrder(chatId);
+      return placed.status === 'approved'
+        ? `✅ *Zepto card order placed successfully via Prava and Steel!*\n\n${placed.detail}${placed.orderReference ? `\n🧾 ${placed.orderReference}` : ''}`
+        : `⚠️ *Zepto card order did not complete.*\n\n${placed.detail}\n\nThe Prava credential was reported as declined; no merchant success was claimed.`;
     }
 
     // Allow switching away from card: if the user says "cash" or "upi" while
@@ -605,4 +637,3 @@ export function listPendingZeptoOrders(): PendingZeptoOrderSummary[] {
   }
   return out.sort((a, b) => a.createdAt - b.createdAt);
 }
-

@@ -5,6 +5,7 @@ import { verifyLinqWebhookSignature } from '@/lib/linq-client';
 import { redactPII } from '@/lib/utils';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
 
 /**
  * Linq webhook — receives `message.received` events from the Linq Partner API.

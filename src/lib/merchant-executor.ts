@@ -1,4 +1,4 @@
-import { createSteelSession } from './steel-client';
+import { createSteelSession, releaseSteelSession } from './steel-client';
 
 export interface MerchantPaymentCredentials {
   /** Visa network token — used as the PAN in the merchant's card form. */
@@ -122,6 +122,39 @@ function isAmazonUrl(url: string): boolean {
   }
 }
 
+/** Parse exported Swiggy web cookies without ever logging their values. */
+function getSwiggyCookies(): Array<{
+  name: string; value: string; domain: string;
+  path?: string; httpOnly?: boolean; secure?: boolean;
+}> | null {
+  const raw = process.env.SWIGGY_SESSION_COOKIES;
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || !parsed.length) return null;
+    return parsed.filter((c: any) => c?.name && c?.value && c?.domain);
+  } catch (err) {
+    console.warn('[MerchantExecutor] Failed to parse SWIGGY_SESSION_COOKIES:', err);
+    return null;
+  }
+}
+
+function getZeptoCookies(): Array<{
+  name: string; value: string; domain: string;
+  path?: string; httpOnly?: boolean; secure?: boolean;
+}> | null {
+  const raw = process.env.ZEPTO_SESSION_COOKIES;
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || !parsed.length) return null;
+    return parsed.filter((c: any) => c?.name && c?.value && c?.domain);
+  } catch (err) {
+    console.warn('[MerchantExecutor] Failed to parse ZEPTO_SESSION_COOKIES:', err);
+    return null;
+  }
+}
+
 /**
  * Execute a real purchase at the merchant using the one-time Prava credential.
  *
@@ -152,7 +185,7 @@ export async function executeMerchantCheckout(
   const session = await createSteelSession(productUrl, {
     country: opts.country || process.env.STEEL_COUNTRY || 'IN',
     stealth: true,
-    solveCaptcha: true,
+    solveCaptcha: process.env.STEEL_SOLVE_CAPTCHA === '1',
     cookies: amazonCookies ?? undefined,
   });
 
@@ -276,7 +309,7 @@ export async function executeMerchantCheckout(
 
     return { status: 'failed', detail: `No clear success/decline signal after ~20s. Steps: ${log.join(' → ')}. Audit the Steel session`, finalUrl };
   } finally {
-    try { await session.browser.close(); } catch { /* ignore */ }
+    await releaseSteelSession(session);
   }
 }
 
@@ -287,10 +320,12 @@ export async function executeSwiggyWebCheckout(
   credentials: MerchantPaymentCredentials,
   opts: { amount?: number; restaurantName?: string; deliveryAddress?: string } = {}
 ): Promise<MerchantExecutionResult> {
+  const swiggyCookies = getSwiggyCookies();
   const session = await createSteelSession('https://www.swiggy.com/checkout', {
     country: process.env.STEEL_COUNTRY || 'IN',
     stealth: true,
-    solveCaptcha: true,
+    solveCaptcha: process.env.STEEL_SOLVE_CAPTCHA === '1',
+    cookies: swiggyCookies ?? undefined,
   });
 
   try {
@@ -300,6 +335,15 @@ export async function executeSwiggyWebCheckout(
 
     trace('opened swiggy checkout page');
     await page.waitForTimeout(2000);
+
+    const pageState = (await page.evaluate(() => document.body?.innerText?.slice(0, 2500) || '')).toLowerCase();
+    if (/log\s*in|sign\s*in|enter your phone number/.test(pageState) && !swiggyCookies) {
+      return {
+        status: 'blocked',
+        detail: 'Swiggy web checkout requires an authenticated browser session. Export the logged-in Swiggy cookies to SWIGGY_SESSION_COOKIES and retry.',
+        finalUrl: page.url(),
+      };
+    }
 
     // 1. Locate Credit / Debit Card option on Swiggy web checkout
     const cardTab = await firstVisible(page, [
@@ -402,6 +446,117 @@ export async function executeSwiggyWebCheckout(
       finalUrl,
     };
   } finally {
-    try { await session.browser.close(); } catch { /* ignore */ }
+    await releaseSteelSession(session);
+  }
+}
+
+/** Execute a Zepto web card checkout using the Prava one-time credential. */
+export async function executeZeptoWebCheckout(
+  credentials: MerchantPaymentCredentials,
+  opts: { amount?: number } = {}
+): Promise<MerchantExecutionResult> {
+  const zeptoCookies = getZeptoCookies();
+  const session = await createSteelSession('https://www.zepto.com/checkout', {
+    country: process.env.STEEL_COUNTRY || 'IN',
+    stealth: true,
+    solveCaptcha: process.env.STEEL_SOLVE_CAPTCHA === '1',
+    cookies: zeptoCookies ?? undefined,
+  });
+
+  try {
+    const { page } = session;
+    const log: string[] = [];
+    const trace = (step: string) => log.push(step);
+
+    trace('opened zepto checkout page');
+    await page.waitForTimeout(2000);
+
+    const pageState = (await page.evaluate(() => document.body?.innerText?.slice(0, 2500) || '')).toLowerCase();
+    if (/log\s*in|sign\s*in|enter your phone number/.test(pageState) && !zeptoCookies) {
+      return {
+        status: 'blocked',
+        detail: 'Zepto web checkout requires an authenticated browser session. Export logged-in Zepto cookies to ZEPTO_SESSION_COOKIES and retry.',
+        finalUrl: page.url(),
+      };
+    }
+
+    const cardTab = await firstVisible(page, [
+      'button:has-text("Credit/Debit")',
+      'button:has-text("Credit & Debit Cards")',
+      'button:has-text("Cards")',
+      'div:has-text("Add New Card")',
+      '[data-testid*="card" i]',
+    ]);
+    if (cardTab) {
+      await cardTab.click();
+      trace('clicked card payment option');
+      await page.waitForTimeout(1000);
+    }
+
+    const cardField = await firstVisible(page, FIELD_CARD_NUMBER);
+    if (!cardField) {
+      return {
+        status: 'blocked',
+        detail: `Zepto payment form not found (steps: ${log.join(' → ')}). Verify the authenticated cart is available in the Steel session.`,
+        finalUrl: page.url(),
+      };
+    }
+
+    await cardField.fill(credentials.pan.replace(/\s/g, ''));
+    trace('filled card number token');
+
+    const expiryField = await firstVisible(page, FIELD_EXPIRY);
+    if (expiryField) {
+      await expiryField.fill(`${credentials.expiryMonth}${credentials.expiryYear.slice(-2)}`);
+      trace('filled expiry');
+    }
+
+    const cvvField = await firstVisible(page, FIELD_CVV);
+    if (cvvField) {
+      await cvvField.fill(credentials.cvv);
+      trace('filled dynamic cvv');
+    }
+
+    const submitBtn = await firstVisible(page, [
+      'button:has-text("PAY")',
+      'button:has-text("Pay")',
+      'button:has-text("PLACE ORDER")',
+      'button:has-text("Place Order")',
+      'button:has-text("PROCEED")',
+      'input[type="submit"]',
+    ]);
+    if (submitBtn) {
+      await submitBtn.click();
+      trace('submitted card payment on Zepto web');
+    } else {
+      trace('no explicit submit button found');
+    }
+
+    const successSignals = ['order placed', 'order confirmed', 'thank you for your order', 'payment successful', 'zepto order'];
+    const declineSignals = ['payment failed', 'card declined', 'transaction declined', 'invalid card', 'payment error', 'enter otp'];
+    let finalUrl = page.url();
+    for (let i = 0; i < 5; i++) {
+      await page.waitForTimeout(4000);
+      finalUrl = page.url();
+      const bodyText = (await page.evaluate(() => document.body?.innerText?.slice(0, 4000) || '')).toLowerCase();
+      const successHit = successSignals.find((s) => bodyText.includes(s));
+      const declineHit = declineSignals.find((s) => bodyText.includes(s));
+      if (successHit) {
+        const orderMatch = bodyText.match(/order\s*(?:id|number|#)?\s*[:#]?\s*([A-Z0-9-]{6,})/i);
+        return {
+          status: 'approved',
+          detail: `Zepto card payment succeeded ("${successHit}" detected)`,
+          orderReference: orderMatch?.[1],
+          finalUrl,
+        };
+      }
+      if (declineHit) {
+        return { status: 'declined', detail: `Zepto card payment failed ("${declineHit}"). Steps: ${log.join(' → ')}`, finalUrl };
+      }
+    }
+
+    return { status: 'failed', detail: `No definitive Zepto checkout outcome after 20s. Steps: ${log.join(' → ')}`, finalUrl };
+  } finally {
+    await releaseSteelSession(session);
   }
 }

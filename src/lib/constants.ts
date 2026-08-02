@@ -1,4 +1,4 @@
-export const PRAVA_API_BASE = process.env.PRAVA_API_BASE || 'https://sandbox.api.prava.space';
+export const PRAVA_API_BASE = process.env.PRAVA_API_BASE || 'https://api.prava.space';
 
 export const CATEGORY_MAP: Record<string, string[]> = {
   'Language Learning': ['Duolingo', 'Babbel', 'Busuu', 'Rosetta Stone'],

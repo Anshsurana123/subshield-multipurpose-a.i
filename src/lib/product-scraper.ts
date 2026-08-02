@@ -1,4 +1,4 @@
-import { createSteelSession } from './steel-client';
+import { createSteelSession, releaseSteelSession } from './steel-client';
 
 export interface ScrapedProductPrice {
   price: number | null;
@@ -156,6 +156,6 @@ export async function scrapeLivePrice(productUrl: string): Promise<ScrapedProduc
       currency: extracted.currency || 'USD',
     };
   } finally {
-    try { await session.browser.close(); } catch { /* ignore close errors */ }
+    await releaseSteelSession(session);
   }
 }

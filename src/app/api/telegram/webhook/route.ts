@@ -3,6 +3,9 @@ import { processTelegramMessage } from '@/lib/telegram-bot';
 import { sendTelegramMessage } from '@/lib/chat-senders';
 import { redactPII } from '@/lib/utils';
 
+export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();

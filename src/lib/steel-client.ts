@@ -3,7 +3,7 @@ import { chromium, Browser, Page } from 'playwright-core';
 
 export interface SteelSessionResult {
   client: Steel;
-  session: any;
+  session: Steel.Session;
   browser: Browser;
   page: Page;
   sessionUrl: string;
@@ -54,50 +54,78 @@ export async function createSteelSession(
   const client = new Steel({ steelAPIKey });
   console.log('[SteelClient] Creating Steel cloud browser session...');
 
-  const sessionParams: any = {
-    // Stealth + captcha solving are the two knobs that make price scraping
-    // and checkout work on bot-protected sites (Amazon.in, Flipkart, etc).
+  const sessionParams: Steel.SessionCreateParams = {
     ...(options.proxy || process.env.STEEL_PROXY_URL
-      ? { proxy: options.proxy || process.env.STEEL_PROXY_URL }
+      ? { proxyUrl: options.proxy || process.env.STEEL_PROXY_URL }
       : {}),
     ...(options.country || process.env.STEEL_COUNTRY
-      ? { country: options.country || process.env.STEEL_COUNTRY }
+      ? {
+          useProxy: {
+            geolocation: {
+              country: (options.country || process.env.STEEL_COUNTRY || 'US').toUpperCase() as any,
+            },
+          },
+        }
       : {}),
     ...(options.stealth ?? process.env.STEEL_STEALTH === '1'
-      ? { stealth: true }
-      : {}),
-    ...(options.solveCaptcha ?? process.env.STEEL_SOLVE_CAPTCHA === '1'
-      ? { solveCaptcha: true }
-      : {}),
+      ? {
+          stealthConfig: {
+            humanizeInteractions: true,
+            ...(options.solveCaptcha ?? process.env.STEEL_SOLVE_CAPTCHA === '1'
+              ? { autoCaptchaSolving: true }
+              : {}),
+          },
+        }
+      : options.solveCaptcha ?? process.env.STEEL_SOLVE_CAPTCHA === '1'
+        ? { solveCaptcha: true }
+        : {}),
     ...(options.userAgent ? { userAgent: options.userAgent } : {}),
-    ...(options.viewport ? { viewport: options.viewport } : {}),
+    ...(options.viewport ? { dimensions: options.viewport } : {}),
   };
 
   const session = await client.sessions.create(sessionParams);
-  console.log(`[SteelClient] Created Steel session: ${session.id}${Object.keys(sessionParams).length ? ` (options: ${JSON.stringify(sessionParams)})` : ''}`);
+  console.log(`[SteelClient] Created Steel session ${session.id}: ${session.debugUrl}`);
 
-  const cdpUrl = `wss://connect.steel.dev?apiKey=${steelAPIKey}&sessionId=${session.id}`;
-  const browser = await chromium.connectOverCDP(cdpUrl);
-  const context = browser.contexts()[0];
-  const page = context.pages()[0] ?? (await context.newPage());
+  let browser: Browser | null = null;
+  try {
+    const cdpUrl = `wss://connect.steel.dev?apiKey=${steelAPIKey}&sessionId=${session.id}`;
+    browser = await chromium.connectOverCDP(cdpUrl);
+    const context = browser.contexts()[0];
+    if (!context) throw new Error('Steel session connected without a browser context.');
+    const page = context.pages()[0] ?? (await context.newPage());
 
-  // Inject pre-authenticated cookies before navigating (login bypass).
-  if (options.cookies?.length) {
-    await context.addCookies(options.cookies);
-    console.log(`[SteelClient] Injected ${options.cookies.length} cookies into session.`);
+    // Inject pre-authenticated cookies before navigating (login bypass).
+    if (options.cookies?.length) {
+      await context.addCookies(options.cookies);
+      console.log(`[SteelClient] Injected ${options.cookies.length} cookies into session.`);
+    }
+
+    const target = initialUrl || 'about:blank';
+    console.log(`[SteelClient] Navigating session ${session.id} to ${target}...`);
+    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    return {
+      client,
+      session,
+      browser,
+      page,
+      sessionUrl: session.debugUrl,
+    };
+  } catch (error) {
+    try { await browser?.close(); } catch { /* ignore cleanup errors */ }
+    try { await client.sessions.release(session.id); } catch { /* ignore cleanup errors */ }
+    throw error;
   }
+}
 
-  const target = initialUrl || 'https://accounts.google.com/ServiceLogin';
-  console.log(`[SteelClient] Navigating session to ${target}...`);
-  await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 });
-
-  const sessionUrl = `https://app.steel.dev/sessions/${session.id}`;
-
-  return {
-    client,
-    session,
-    browser,
-    page,
-    sessionUrl,
-  };
+/** Close the CDP connection and release the remote Steel session. */
+export async function releaseSteelSession(session: SteelSessionResult): Promise<void> {
+  try {
+    await session.browser.close();
+  } catch {
+    // The remote session release below is still required if the CDP connection
+    // has already gone away.
+  } finally {
+    try { await session.client.sessions.release(session.session.id); } catch { /* ignore cleanup errors */ }
+  }
 }

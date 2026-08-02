@@ -48,6 +48,9 @@ class PravaClient {
      *  trigger execution right away instead of waiting for the next cron. */
     callbackUrl?: string;
   }): Promise<PravaSession> {
+    if (!this.secretKey) {
+      throw new Error('MERCHANT_SECRET_KEY is missing from environment variables.');
+    }
     const formattedAmount = params.amount.toFixed(2);
 
     const payload: any = {
@@ -94,6 +97,9 @@ class PravaClient {
     }
 
     const data = await response.json();
+    if (!data.session_id || !data.session_token || !data.iframe_url) {
+      throw new Error('Prava returned an incomplete session response.');
+    }
     return {
       sessionId: data.session_id,
       sessionToken: data.session_token,
