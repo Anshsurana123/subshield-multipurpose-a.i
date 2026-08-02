@@ -83,7 +83,32 @@ export async function createSteelSession(
     ...(options.viewport ? { dimensions: options.viewport } : {}),
   };
 
-  const session = await client.sessions.create(sessionParams);
+  let session: Steel.Session;
+  try {
+    session = await client.sessions.create(sessionParams);
+  } catch (err: any) {
+    if (
+      err?.status === 403 ||
+      (err?.message && String(err.message).includes('10 in paid balance'))
+    ) {
+      console.warn(
+        '[Steel Client] Steel API requires $10 paid balance for built-in proxies/CAPTCHA solving. Retrying session without built-in proxies/CAPTCHA...'
+      );
+      const fallbackParams: Steel.SessionCreateParams = {
+        ...(options.proxy || process.env.STEEL_PROXY_URL
+          ? { proxyUrl: options.proxy || process.env.STEEL_PROXY_URL }
+          : {}),
+        ...(options.stealth ?? process.env.STEEL_STEALTH === '1'
+          ? { stealthConfig: { humanizeInteractions: true } }
+          : {}),
+        ...(options.userAgent ? { userAgent: options.userAgent } : {}),
+        ...(options.viewport ? { dimensions: options.viewport } : {}),
+      };
+      session = await client.sessions.create(fallbackParams);
+    } else {
+      throw err;
+    }
+  }
 
   let browser: Browser | null = null;
   try {
