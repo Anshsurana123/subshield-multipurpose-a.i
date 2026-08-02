@@ -1,10 +1,6 @@
-import OpenAI from 'openai';
+import { createChatCompletion } from './ai-client';
 import { Browserbase } from '@browserbasehq/sdk';
 import { Alternative } from './types';
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || '',
-});
 
 export async function scrapeLivePrices(vendor: string, currentPrice: number): Promise<Alternative[]> {
   console.log(`[PriceScraper] Finding live pricing alternatives for ${vendor} (current: $${currentPrice})...`);
@@ -64,7 +60,7 @@ Return JSON in this EXACT format:
 }`;
 
   try {
-    const response = await openai.chat.completions.create({
+    const response = await createChatCompletion({
       model: 'gpt-4o',
       messages: [{ role: 'system', content: prompt }],
       response_format: { type: 'json_object' },

@@ -1,7 +1,7 @@
 import { ParsedSubscription, Subscription, SubscriptionStatus } from './types';
 import { CATEGORY_MAP, PRICE_HIKE_THRESHOLD, DEFAULT_CURRENCY } from './constants';
 import { generateId } from './utils';
-import OpenAI from 'openai';
+import { createChatCompletion } from './ai-client';
 
 const VENDOR_DOMAINS: Record<string, string> = {
   'Spotify Premium': 'spotify.com',
@@ -114,10 +114,9 @@ async function getCategory(vendor: string): Promise<string> {
     }
   }
 
-  if (process.env.OPENAI_API_KEY) {
+  if (process.env.OPENAI_API_KEY || process.env.GROQ_API_KEY) {
     try {
-      const openai = new OpenAI();
-      const response = await openai.chat.completions.create({
+      const response = await createChatCompletion({
         model: 'gpt-4o',
         messages: [
           {
@@ -130,9 +129,9 @@ async function getCategory(vendor: string): Promise<string> {
         temperature: 0,
         max_tokens: 20,
       });
-      return response.choices[0].message.content?.trim() || 'Uncategorized';
+      return response.choices[0]?.message?.content?.trim() || 'Uncategorized';
     } catch (e) {
-      console.error('OpenAI category error:', e);
+      console.error('AI category error:', e);
     }
   }
 

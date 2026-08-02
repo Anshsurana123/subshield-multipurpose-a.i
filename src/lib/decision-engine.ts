@@ -1,10 +1,6 @@
-import OpenAI from 'openai';
+import { createChatCompletion } from './ai-client';
 import { Subscription, Alternative, Decision, ReplacementDifficulty, DecisionType } from './types';
 import { getSupabaseAdmin } from './supabase/server';
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || '',
-});
 
 export async function classifyReplacementDifficulty(
   vendor: string,
@@ -25,7 +21,7 @@ Return JSON:
 }`;
 
   try {
-    const res = await openai.chat.completions.create({
+    const res = await createChatCompletion({
       model: 'gpt-4o',
       messages: [{ role: 'system', content: prompt }],
       response_format: { type: 'json_object' },

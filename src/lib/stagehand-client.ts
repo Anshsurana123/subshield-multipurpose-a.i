@@ -1,13 +1,14 @@
 export async function createStagehandBrowser() {
   const { Stagehand } = await import('@browserbasehq/stagehand');
+  const useOpenAI = Boolean(process.env.OPENAI_API_KEY);
   const stagehand = new Stagehand({
     env: 'BROWSERBASE',
     apiKey: process.env.BROWSERBASE_API_KEY,
     projectId: process.env.BROWSERBASE_PROJECT_ID,
-    modelName: 'gpt-4o',
-    modelClientOptions: {
-      apiKey: process.env.OPENAI_API_KEY,
-    },
+    modelName: useOpenAI ? 'gpt-4o' : (process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'),
+    modelClientOptions: useOpenAI
+      ? { apiKey: process.env.OPENAI_API_KEY }
+      : { apiKey: process.env.GROQ_API_KEY, baseURL: 'https://api.groq.com/openai/v1' },
     logger: () => {},
   });
   await stagehand.init();

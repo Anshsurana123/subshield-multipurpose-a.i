@@ -1,8 +1,4 @@
-import OpenAI from 'openai';
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || '',
-});
+import { createChatCompletion } from './ai-client';
 
 /**
  * Natural-language intent parsing for chat messages.
@@ -149,8 +145,8 @@ export async function parseIntentWithLLM(text: string): Promise<ParsedIntent | n
   ].join('\n');
 
   try {
-    const res = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || 'gpt-5.6-luna',
+    const res = await createChatCompletion({
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: system },
