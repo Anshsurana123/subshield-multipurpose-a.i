@@ -1,315 +1,254 @@
-import { TrackedProduct } from './types';
-import { supabaseAdmin } from './supabase/server';
-import { sendPushNotification } from './push-notifications';
+import type { ChatChannel, TrackedProduct } from './types';
+import { getSupabaseAdmin } from './supabase/server';
 import { scrapeLivePrice } from './product-scraper';
-import { sendChatMessage } from './chat-senders';
 import { formatPrice } from './chat-intent';
-import { startAutoBuy, executeAutoBuy } from './auto-buy';
-import type { ChatChannel } from './types';
+import { requirePublicHttpsUrl } from './security/url';
 
-// In-memory fallback cache
-const memoryTrackedProducts: TrackedProduct[] = [];
+const PUBLIC_TRACKER_COLUMNS = [
+  'id',
+  'user_id',
+  'product_url',
+  'product_name',
+  'current_price',
+  'target_price',
+  'currency',
+  'status',
+  'last_scanned_at',
+  'created_at',
+  'updated_at',
+  'source_channel',
+].join(',');
 
-function stripUrlParams(url: string): string {
-  try {
-    const u = new URL(url);
-    u.search = '';
-    u.hash = '';
-    return u.toString();
-  } catch {
-    return url;
+function mapRowToProduct(row: any, includePrivateSource = false): TrackedProduct {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    productUrl: row.product_url,
+    productName: row.product_name,
+    currentPrice: Number(row.current_price),
+    targetPrice: Number(row.target_price),
+    currency: row.currency,
+    status: row.status,
+    lastScannedAt: row.last_scanned_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    sourceChannel: row.source_channel || undefined,
+    sourceChatId: includePrivateSource ? row.source_chat_id || undefined : undefined,
+    sourceEventId: includePrivateSource ? row.source_event_id || undefined : undefined,
+    pravaSessionId: undefined,
+  };
+}
+
+function requireUserId(userId: string | undefined): string {
+  if (!userId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(userId)) {
+    throw new Error('An authenticated user ID is required');
+  }
+  return userId;
+}
+
+export class TrackerEnrollmentError extends Error {
+  readonly status: number;
+
+  constructor(readonly reason: string) {
+    super(reason === 'rate_limited'
+      ? 'Tracker enrollment rate limit exceeded'
+      : 'Tracker enrollment quota exceeded');
+    this.name = 'TrackerEnrollmentError';
+    this.status = reason === 'rate_limited' ? 429 : 409;
   }
 }
 
 export async function addTrackedProduct(params: {
-  userId?: string;
+  userId: string;
   productUrl: string;
   productName?: string;
   targetPrice: number;
   currency?: string;
   channel?: ChatChannel | 'web';
   chatId?: string;
+  eventId?: string;
+  requestId?: string;
 }): Promise<TrackedProduct> {
-  const userId = params.userId || 'demo-user-id';
-  let productName = params.productName || 'Tracked Product';
-  let currentPrice = params.targetPrice * 1.15; // Initial default estimate before scan
-  const currency = params.currency || 'USD';
-
-  // Try scraping initial product details (title + live price) via Steel
-  try {
-    if (process.env.STEEL_API_KEY) {
-      console.log(`[PriceTracker] Fetching product details via Steel: ${params.productUrl}`);
-      const scraped = await scrapeLivePrice(params.productUrl);
-      if (scraped.title && !params.productName) {
-        productName = scraped.title.substring(0, 60);
-      }
-      if (scraped.price !== null) {
-        currentPrice = scraped.price;
-      }
-    }
-  } catch (err) {
-    console.warn('[PriceTracker] Initial scrap warning:', err);
-  }
-
-  const product: TrackedProduct = {
-    id: `prod_${Math.random().toString(36).substring(2, 9)}`,
-    userId,
-    productUrl: stripUrlParams(params.productUrl),
-    productName,
-    currentPrice,
-    targetPrice: params.targetPrice,
-    currency,
-    status: 'active',
-    lastScannedAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    sourceChannel: params.channel,
-    sourceChatId: params.chatId,
-  };
-
-  // Save to Supabase if table exists, otherwise in-memory
-  try {
-    await supabaseAdmin.from('tracked_products').insert({
-      id: product.id,
-      user_id: product.userId,
-      product_url: product.productUrl,
-      product_name: product.productName,
-      current_price: product.currentPrice,
-      target_price: product.targetPrice,
-      currency: product.currency,
-      status: product.status,
-      source_channel: product.sourceChannel || null,
-      source_chat_id: product.sourceChatId || null,
-    });
-  } catch (dbErr) {
-    console.warn('[PriceTracker] Database insert fallback to memory:', dbErr);
-    memoryTrackedProducts.push(product);
-  }
-
-  return product;
-}
-
-export async function getTrackedProducts(userId = 'demo-user-id'): Promise<TrackedProduct[]> {
-  try {
-    const { data, error } = await supabaseAdmin
+  const userId = requireUserId(params.userId);
+  if (params.channel && params.eventId) {
+    const { data: existing, error: existingError } = await getSupabaseAdmin()
       .from('tracked_products')
-      .select('*')
+      .select(PUBLIC_TRACKER_COLUMNS)
+      .eq('source_channel', params.channel)
+      .eq('source_event_id', params.eventId)
       .eq('user_id', userId)
-      .order('created_at', { ascending: false });
+      .maybeSingle();
+    if (existingError) throw new Error(`Tracked event lookup failed: ${existingError.code}`);
+    if (existing) return mapRowToProduct(existing);
+  }
 
-    if (!error && data) {
-      return data.map(mapRowToProduct);
+  const safeUrl = await requirePublicHttpsUrl(params.productUrl);
+  if (!Number.isFinite(params.targetPrice) || params.targetPrice <= 0) {
+    throw new Error('targetPrice must be positive');
+  }
+
+  const id = params.requestId || crypto.randomUUID();
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error('requestId must be a UUID');
+  }
+  const { data: reservationData, error: reservationError } = await getSupabaseAdmin()
+    .rpc('reserve_tracker_enrollment', { p_user_id: userId, p_request_id: id });
+  if (reservationError) throw new Error(`Tracker enrollment reservation failed: ${reservationError.code}`);
+  const reservation = Array.isArray(reservationData) ? reservationData[0] : reservationData;
+  if (!reservation?.accepted) {
+    if (reservation?.reason === 'already_enrolled') {
+      const { data: existing, error: existingError } = await getSupabaseAdmin()
+        .from('tracked_products')
+        .select(PUBLIC_TRACKER_COLUMNS)
+        .eq('id', id)
+        .eq('user_id', userId)
+        .single();
+      if (existingError || !existing) throw new Error('Tracker idempotency recovery failed');
+      return mapRowToProduct(existing);
     }
-  } catch { /* DB fallback */ }
+    throw new TrackerEnrollmentError(String(reservation?.reason || 'quota_exceeded'));
+  }
 
-  return memoryTrackedProducts.filter((p) => p.userId === userId);
-}
+  const scraped = await scrapeLivePrice(safeUrl.toString());
+  if (scraped.price === null) {
+    throw new Error('A verified current price is required before tracking can start');
+  }
+  const productName = params.productName?.trim() || scraped.title?.slice(0, 120) || 'Tracked Product';
+  const currentPrice = scraped.price;
+  const scrapedCurrency = scraped.currency.toUpperCase();
+  const currency = params.currency?.toUpperCase() || scrapedCurrency;
+  if (!/^[A-Z]{3}$/.test(currency)) throw new Error('currency must be an ISO 4217 code');
+  if (params.currency && /^[A-Z]{3}$/.test(scrapedCurrency) && scrapedCurrency !== currency) {
+    throw new Error('The verified price currency does not match the requested currency');
+  }
 
-/** Fetch every tracked product across all users (used by the cron scanner). */
-export async function getAllTrackedProducts(): Promise<TrackedProduct[]> {
-  try {
-    const { data, error } = await supabaseAdmin
+  const { data, error } = await getSupabaseAdmin()
+    .from('tracked_products')
+    .insert({
+      id,
+      user_id: userId,
+      product_url: safeUrl.toString(),
+      product_name: productName,
+      current_price: currentPrice,
+      target_price: params.targetPrice,
+      currency,
+      status: 'active',
+      source_channel: params.channel || null,
+      source_chat_id: params.chatId || null,
+      source_event_id: params.eventId || null,
+    })
+    .select(PUBLIC_TRACKER_COLUMNS)
+    .single();
+  if (error?.code === '23505' && params.channel && params.eventId) {
+    const { data: existing, error: existingError } = await getSupabaseAdmin()
       .from('tracked_products')
-      .select('*')
-      .order('created_at', { ascending: false });
-
-    if (!error && data) {
-      return data.map(mapRowToProduct);
-    }
-  } catch { /* DB fallback */ }
-
-  return [...memoryTrackedProducts];
+      .select(PUBLIC_TRACKER_COLUMNS)
+      .eq('source_channel', params.channel)
+      .eq('source_event_id', params.eventId)
+      .eq('user_id', userId)
+      .single();
+    if (existingError || !existing) throw new Error(`Tracked event recovery failed: ${existingError?.code || 'no_row'}`);
+    return mapRowToProduct(existing);
+  }
+  if (error || !data) throw new Error(`Tracked product insert failed: ${error?.code || 'no_row'}`);
+  return mapRowToProduct(data);
 }
 
-function mapRowToProduct(d: any): TrackedProduct {
-  return {
-    id: d.id,
-    userId: d.user_id,
-    productUrl: d.product_url,
-    productName: d.product_name,
-    currentPrice: Number(d.current_price),
-    targetPrice: Number(d.target_price),
-    currency: d.currency || 'USD',
-    status: d.status,
-    lastScannedAt: d.last_scanned_at,
-    createdAt: d.created_at,
-    updatedAt: d.updated_at,
-    sourceChannel: d.source_channel || undefined,
-    sourceChatId: d.source_chat_id || undefined,
-    pravaSessionId: d.prava_session_id || undefined,
-  };
+export async function getTrackedProducts(userId: string): Promise<TrackedProduct[]> {
+  const { data, error } = await getSupabaseAdmin()
+    .from('tracked_products')
+    .select(PUBLIC_TRACKER_COLUMNS)
+    .eq('user_id', requireUserId(userId))
+    .order('created_at', { ascending: false });
+  if (error) throw new Error(`Tracked product read failed: ${error.code}`);
+  return (data || []).map((row) => mapRowToProduct(row, false));
 }
 
-async function persistProductUpdate(id: string, patch: Record<string, unknown>): Promise<void> {
-  try {
-    await supabaseAdmin.from('tracked_products').update(patch).eq('id', id);
-  } catch (err) {
-    console.warn('[PriceTracker] DB update fallback (in-memory only):', err);
-  }
-}
+async function scanTrackedProduct(item: TrackedProduct): Promise<{ targetReached: boolean }> {
+  // Revalidate stored data on every scan. This protects upgraded databases and
+  // any row that did not enter through the current API boundary.
+  const safeUrl = await requirePublicHttpsUrl(item.productUrl);
+  const scraped = await scrapeLivePrice(safeUrl.toString());
+  if (scraped.price === null) throw new Error('Verified price unavailable');
 
-async function notifyChat(item: TrackedProduct, message: string): Promise<void> {
-  if (item.sourceChannel && item.sourceChatId) {
-    await sendChatMessage(item.sourceChannel, item.sourceChatId, message);
-  }
-}
+  const currency = scraped.currency.toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) throw new Error('Merchant returned an invalid currency');
+  const currencyChanged = currency !== item.currency;
+  const now = new Date().toISOString();
 
-/**
- * Step 1 — live price check for an ACTIVE product. If the target is hit,
- * start a Prava session and transition to `target_reached` (awaiting the
- * user's passkey approval).
- */
-async function checkAndStartBuy(item: TrackedProduct): Promise<{ started: boolean; livePrice: number | null }> {
-  console.log(`[PriceTracker] Scanning price for ${item.productName}...`);
-
-  let livePrice: number | null = null;
-  try {
-    const scraped = await scrapeLivePrice(item.productUrl);
-    livePrice = scraped.price;
-    if (scraped.title && scraped.title !== 'Tracked Product') {
-      await persistProductUpdate(item.id, { product_name: scraped.title.substring(0, 60) });
-    }
-  } catch (err) {
-    console.warn(`[PriceTracker] Scrape failed for ${item.productName}:`, err);
+  if (currencyChanged) {
+    const { error } = await getSupabaseAdmin()
+      .from('tracked_products')
+      .update({
+        product_name: scraped.title?.slice(0, 120) || item.productName,
+        last_scanned_at: now,
+        updated_at: now,
+      })
+      .eq('id', item.id)
+      .eq('user_id', item.userId);
+    if (error) throw new Error(`Tracked currency-mismatch update failed: ${error.code}`);
+    return { targetReached: false };
   }
 
-  if (livePrice === null) {
-    console.warn(`[PriceTracker] No live price for ${item.productName} — skipping (fail-safe, no purchase).`);
-    return { started: false, livePrice: null };
+  if (scraped.price > item.targetPrice) {
+    const { error } = await getSupabaseAdmin()
+      .from('tracked_products')
+      .update({
+        current_price: scraped.price,
+        currency,
+        product_name: scraped.title?.slice(0, 120) || item.productName,
+        last_scanned_at: now,
+        updated_at: now,
+      })
+      .eq('id', item.id)
+      .eq('user_id', item.userId);
+    if (error) throw new Error(`Tracked product update failed: ${error.code}`);
+
+    return { targetReached: false };
   }
 
-  await persistProductUpdate(item.id, {
-    current_price: livePrice,
-    last_scanned_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+  // Atomic target claim. Scanning never creates a payment session or executes
+  // checkout; a separately confirmed quote workflow must do that later.
+  const title = `Target reached: ${item.productName}`;
+  const body = `Price is ${formatPrice(scraped.price, currency)}. Checkout has not started; review an exact merchant quote first.`;
+  const { data, error } = await getSupabaseAdmin().rpc('claim_tracker_target', {
+    p_product_id: item.id,
+    p_user_id: item.userId,
+    p_current_price: scraped.price,
+    p_currency: currency,
+    p_product_name: scraped.title?.slice(0, 120) || item.productName,
+    p_title: title,
+    p_body: body,
   });
+  if (error) throw new Error(`Tracked target claim failed: ${error.code}`);
+  const row = Array.isArray(data) ? data[0] : data;
+  return { targetReached: Boolean(row?.claimed) };
+}
 
-  if (livePrice > item.targetPrice) {
-    console.log(`[PriceTracker] ${item.productName} still ${formatPrice(livePrice, item.currency)} > target ${formatPrice(item.targetPrice, item.currency)}. Keep monitoring.`);
-    return { started: false, livePrice };
-  }
+export async function scanNextTrackedProduct(): Promise<{ scanned: boolean; targetReached: boolean }> {
+  const { data, error } = await getSupabaseAdmin().rpc('claim_tracked_product_scan', {
+    p_lease_seconds: 240,
+  });
+  if (error) throw new Error(`Tracker scan claim failed: ${error.code}`);
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) return { scanned: false, targetReached: false };
 
-  // 🎯 Target hit — start the Prava buy order
-  console.log(`🎯 [PriceTracker] Price target hit for ${item.productName}! (${formatPrice(livePrice, item.currency)} <= ${formatPrice(item.targetPrice, item.currency)})`);
-
+  const item = mapRowToProduct(row, true);
+  const leaseToken = typeof row.scan_lease_token === 'string' ? row.scan_lease_token : '';
+  if (!leaseToken) throw new Error('Tracker scan claim did not return a lease token');
+  let succeeded = false;
   try {
-    // callback_url: Prava redirects here the moment the user approves with a
-    // passkey, so the buy executes immediately instead of waiting for the
-    // next (daily, on Hobby) cron run. The URL carries the owning userId (so
-    // chat-enrolled products resolve) plus an HMAC so the unauthenticated
-    // redirect can't be replayed to trigger purchases for arbitrary items.
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || '';
-    const secret = process.env.CRON_SECRET || 'subshield_cron_secret_key_2026';
-    const token = await crypto.subtle
-      .digest('SHA-256', new TextEncoder().encode(`${item.id}:${secret}`))
-      .then((buf) => Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join(''));
-    const callbackUrl = appUrl
-      ? `${appUrl}/api/prava/execute-buy?productId=${encodeURIComponent(item.id)}&userId=${encodeURIComponent(item.userId)}&cb=${token}`
-      : undefined;
-    const started = await startAutoBuy(item, callbackUrl);
-    item.status = 'target_reached';
-    item.pravaSessionId = started.sessionId;
-    await persistProductUpdate(item.id, {
-      status: 'target_reached',
-      prava_session_id: started.sessionId,
-      current_price: livePrice,
-      updated_at: new Date().toISOString(),
+    const result = await scanTrackedProduct(item);
+    succeeded = true;
+    return { scanned: true, targetReached: result.targetReached };
+  } finally {
+    const { data: finished, error: finishError } = await getSupabaseAdmin().rpc('finish_tracked_product_scan', {
+      p_product_id: item.id,
+      p_lease_token: leaseToken,
+      p_succeeded: succeeded,
     });
-
-    await notifyChat(
-      item,
-      `🎉 *Target Price Hit!*\n\n` +
-      `📦 ${item.productName}\n` +
-      `💰 Price dropped to ${formatPrice(livePrice, item.currency)} (target: ${formatPrice(item.targetPrice, item.currency)})\n\n` +
-      `✅ Prava buy order started. Approve the payment here:\n${started.paymentLink || ''}`
-    );
-
-    await sendPushNotification(
-      item.userId,
-      `🎉 Target Price Hit: ${item.productName}!`,
-      `Price dropped to ${formatPrice(livePrice, item.currency)} (Target: ${formatPrice(item.targetPrice, item.currency)}). Approve the Prava payment to complete your auto-purchase!`,
-      'switch_suggestion'
-    );
-
-    return { started: true, livePrice };
-  } catch (err) {
-    console.error(`[PriceTracker] Failed to start Prava buy order for ${item.productName}:`, err);
-    return { started: false, livePrice };
-  }
-}
-
-/**
- * Step 2 — for a `target_reached` product with an open session, poll for the
- * user's passkey approval, execute the real merchant checkout, and report the
- * outcome to Prava. On success transition to `purchased`.
- */
-async function finishBuy(item: TrackedProduct): Promise<{ purchased: boolean }> {
-  if (!item.pravaSessionId) return { purchased: false };
-
-  console.log(`[PriceTracker] Awaiting approval & executing purchase for ${item.productName} (session ${item.pravaSessionId})...`);
-  const result = await executeAutoBuy(item, item.pravaSessionId);
-
-  if (result.status === 'reported' || result.status === 'completed') {
-    item.status = 'purchased';
-    await persistProductUpdate(item.id, { status: 'purchased', updated_at: new Date().toISOString() });
-
-    await notifyChat(
-      item,
-      `✅ *Purchase Complete!*\n\n` +
-      `📦 ${item.productName}\n` +
-      `🧾 ${result.orderReference ? `Order: ${result.orderReference}\n` : ''}${result.detail}`
-    );
-    return { purchased: true };
-  }
-
-  if (result.status === 'declined' || result.status === 'failed') {
-    await notifyChat(
-      item,
-      `⚠️ *Purchase attempt did not complete.*\n\n📦 ${item.productName}\n${result.detail}\n\nI'll keep monitoring for another chance.`
-    );
-    // Return to active monitoring so the target can be re-hit.
-    item.status = 'active';
-    await persistProductUpdate(item.id, { status: 'active', updated_at: new Date().toISOString() });
-    return { purchased: false };
-  }
-
-  // pending_approval — user hasn't approved yet; keep waiting.
-  return { purchased: false };
-}
-
-export async function scanAndBuyTrackedProducts(userId = 'demo-user-id'): Promise<{ scanned: number; purchased: number }> {
-  const products = await getTrackedProducts(userId);
-  let scanned = 0;
-  let purchased = 0;
-
-  for (const item of products) {
-    if (item.status === 'active') {
-      scanned++;
-      await checkAndStartBuy(item);
-    } else if (item.status === 'target_reached') {
-      const res = await finishBuy(item);
-      if (res.purchased) purchased++;
+    if (finishError || finished !== true) {
+      throw new Error(`Tracker scan completion failed: ${finishError?.code || 'lease_lost'}`);
     }
   }
-
-  return { scanned, purchased };
-}
-
-/** Scan every tracked product for every user — used by the cron price-scan route. */
-export async function scanAndBuyAllTrackedProducts(): Promise<{ scanned: number; purchased: number }> {
-  const products = await getAllTrackedProducts();
-  let scanned = 0;
-  let purchased = 0;
-
-  for (const item of products) {
-    if (item.status === 'active') {
-      scanned++;
-      await checkAndStartBuy(item);
-    } else if (item.status === 'target_reached') {
-      const res = await finishBuy(item);
-      if (res.purchased) purchased++;
-    }
-  }
-
-  return { scanned, purchased };
 }

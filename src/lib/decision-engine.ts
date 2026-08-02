@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import { Subscription, Alternative, Decision, ReplacementDifficulty, DecisionType } from './types';
-import { supabaseAdmin } from './supabase/server';
+import { getSupabaseAdmin } from './supabase/server';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || '',
@@ -61,8 +61,6 @@ export async function processDecisionForSubscription(
   subscription: Subscription,
   alternatives: Alternative[]
 ): Promise<Decision> {
-  console.log(`[DecisionEngine] Evaluating decision for ${subscription.vendor}...`);
-
   // 1. Find cheapest alternative
   const cheaperAlt = alternatives
     .filter((a) => a.price < subscription.currentPrice)
@@ -96,7 +94,7 @@ export async function processDecisionForSubscription(
   }
 
   const decision: Decision = {
-    id: `dec_${Math.random().toString(36).substring(2, 9)}`,
+    id: crypto.randomUUID(),
     subscriptionId: subscription.id,
     type: decisionType,
     status: 'pending',
@@ -105,18 +103,14 @@ export async function processDecisionForSubscription(
     createdAt: new Date().toISOString(),
   };
 
-  // Log to Supabase if configured
-  try {
-    await supabaseAdmin.from('decisions').insert({
-      id: decision.id,
-      subscription_id: subscription.id,
-      type: decision.type,
-      status: decision.status,
-      reason: decision.reason,
-    });
-  } catch (dbErr) {
-    console.warn('[DecisionEngine] Could not persist decision to DB:', dbErr);
-  }
+  const { error } = await getSupabaseAdmin().from('decisions').insert({
+    id: decision.id,
+    subscription_id: subscription.id,
+    type: decision.type,
+    status: decision.status,
+    reason: decision.reason,
+  });
+  if (error) throw new Error(`Decision persistence failed: ${error.code}`);
 
   return decision;
 }

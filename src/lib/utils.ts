@@ -17,10 +17,7 @@ export function formatDate(dateStr: string): string {
 }
 
 export function generateId(): string {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID();
-  }
-  return Math.random().toString(36).substring(2, 15);
+  return crypto.randomUUID();
 }
 
 export function daysBetween(date1: string, date2: string): number {
@@ -49,14 +46,4 @@ export function truncateTokenForDisplay(token: string): string {
  */
 export function redactPII(input: unknown): string {
   return String(input ?? '').replace(/\b\d[\d -]{11,}\d\b/g, '[REDACTED-NUMBER]');
-}
-
-/**
- * Derive a Prava user email from a chat user id (channel-prefixed, e.g.
- * `tg_123`). Lives here (not in auto-buy) so the chat webhook hot path can
- * use it without pulling the heavy auto-buy → steel module graph.
- */
-export function chatEmailForUser(userId: string): string {
-  const safe = userId.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 60);
-  return `${safe}@subshield.app`;
 }

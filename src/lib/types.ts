@@ -1,6 +1,6 @@
-// ─── Tracked Product (Price Tracker + Prava Purchase Orders) ──────────────────
+// ─── Tracked Product (read-only target alerts) ────────────────────────────────
 
-export type TrackedProductStatus = 'active' | 'target_reached' | 'purchased' | 'cancelled';
+export type TrackedProductStatus = 'active' | 'target_reached' | 'purchased' | 'cancelled' | 'unknown_reconciliation';
 
 export type ChatChannel = 'telegram' | 'linq';
 
@@ -20,7 +20,9 @@ export interface TrackedProduct {
   sourceChannel?: 'telegram' | 'linq' | 'web';
   /** Chat ID used to notify the user when the price target is hit */
   sourceChatId?: string;
-  /** Prava session id once an auto-buy order has been started (status 'target_reached') */
+  /** Provider event key used only by trusted workers for idempotency. */
+  sourceEventId?: string;
+  /** Legacy server-only migration field; never returned by the tracker API. */
   pravaSessionId?: string;
 }
 
@@ -226,18 +228,12 @@ export interface SavedCard {
 export type AuditPhase = 'idle' | 'scanning_gmail' | 'scanning_subs' | 'analyzing' | 'complete';
 export type NegotiationPhase = 'idle' | 'searching-alternatives' | 'negotiating' | 'awaiting-decision' | 'complete';
 export type CheckoutPhase = 'idle' | 'creating' | 'card-entry' | 'polling' | 'reporting' | 'completed' | 'failed';
-export type DemoPhase = 'idle' | 'discover' | 'decide' | 'act' | 'complete';
 
 // ─── API Request / Response Shapes ────────────────────────────────────────────
 
 export interface CreateSessionRequest {
-  userId: string;
-  userEmail: string;
-  vendorName: string;
-  vendorDomain: string;
-  amount: number;
-  currency: string;
-  description: string;
+  purchaseOrderId: string;
+  expectedVersion: number;
 }
 
 export interface AuditRequest {

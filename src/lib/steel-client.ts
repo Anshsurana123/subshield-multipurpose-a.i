@@ -1,5 +1,6 @@
 import Steel from 'steel-sdk';
 import { chromium, Browser, Page } from 'playwright-core';
+import { requirePublicHttpsUrl } from './security/url';
 
 export interface SteelSessionResult {
   client: Steel;
@@ -52,7 +53,6 @@ export async function createSteelSession(
   }
 
   const client = new Steel({ steelAPIKey });
-  console.log('[SteelClient] Creating Steel cloud browser session...');
 
   const sessionParams: Steel.SessionCreateParams = {
     ...(options.proxy || process.env.STEEL_PROXY_URL
@@ -84,7 +84,6 @@ export async function createSteelSession(
   };
 
   const session = await client.sessions.create(sessionParams);
-  console.log(`[SteelClient] Created Steel session ${session.id}: ${session.debugUrl}`);
 
   let browser: Browser | null = null;
   try {
@@ -97,11 +96,27 @@ export async function createSteelSession(
     // Inject pre-authenticated cookies before navigating (login bypass).
     if (options.cookies?.length) {
       await context.addCookies(options.cookies);
-      console.log(`[SteelClient] Injected ${options.cookies.length} cookies into session.`);
     }
 
+    // Validate both the initial target and every main-frame redirect before the
+    // cloud browser follows it. Subresources remain usable, while redirects to
+    // loopback/private networks are aborted.
+    if (initialUrl) await requirePublicHttpsUrl(initialUrl);
+    await context.route('**/*', async (route) => {
+      const request = route.request();
+      if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) {
+        await route.continue();
+        return;
+      }
+      try {
+        await requirePublicHttpsUrl(request.url());
+        await route.continue();
+      } catch {
+        await route.abort('blockedbyclient');
+      }
+    });
+
     const target = initialUrl || 'about:blank';
-    console.log(`[SteelClient] Navigating session ${session.id} to ${target}...`);
     await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
     return {

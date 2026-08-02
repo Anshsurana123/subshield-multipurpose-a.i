@@ -10,70 +10,41 @@ const LINQ_API_BASE = 'https://api.linqapp.com/api/partner/v3';
  */
 export function verifyLinqWebhookSignature(
   rawBody: string,
-  headers: Headers
+  headers: Headers,
+  nowSeconds = Math.floor(Date.now() / 1000)
 ): boolean {
-  const secret = process.env.LINQ_WEBHOOK_SECRET;
+  const secret = process.env.LINQ_WEBHOOK_SECRET?.trim();
   if (!secret) {
-    console.warn('[LinqClient] LINQ_WEBHOOK_SECRET not configured — skipping signature verification.');
-    return true;
-  }
-
-  // 1. Official Linq v3 Webhook Signature Verification (Standard Webhook / Svix style)
-  // Headers: webhook-id, webhook-timestamp, webhook-signature
-  const msgId = headers.get('webhook-id');
-  const timestamp = headers.get('webhook-timestamp');
-  const webhookSignature = headers.get('webhook-signature');
-
-  if (msgId && timestamp && webhookSignature) {
-    try {
-      const secretStr = secret.startsWith('whsec_') ? secret.slice(6) : secret;
-      const keyBytes = Buffer.from(secretStr, 'base64');
-      const signedContent = `${msgId}.${timestamp}.${rawBody}`;
-      const expectedBase64 = createHmac('sha256', keyBytes)
-        .update(signedContent)
-        .digest('base64');
-
-      const isValid = webhookSignature.split(' ').some((sig) => {
-        if (!sig.startsWith('v1,')) return false;
-        try {
-          const sigBuf = Buffer.from(sig.slice(3), 'base64');
-          const expectedBuf = Buffer.from(expectedBase64, 'base64');
-          return sigBuf.length === expectedBuf.length && timingSafeEqual(sigBuf, expectedBuf);
-        } catch {
-          return false;
-        }
-      });
-
-      if (isValid) return true;
-    } catch (err) {
-      console.warn('[LinqClient] Standard webhook signature check exception:', err);
-    }
-  }
-
-  // 2. Fallback candidate header check (hex HMAC)
-  const candidates = [
-    headers.get('x-webhook-signature'),
-    headers.get('x-linq-signature'),
-    headers.get('x-signature'),
-    headers.get('linq-signature'),
-  ].filter((v): v is string => !!v);
-
-  if (candidates.length === 0 && !webhookSignature) {
-    console.warn('[LinqClient] No signature header found on Linq webhook.');
     return false;
   }
 
-  const expectedHex = createHmac('sha256', secret).update(rawBody, 'utf8').digest();
+  const msgId = headers.get('webhook-id');
+  const timestamp = headers.get('webhook-timestamp');
+  const webhookSignature = headers.get('webhook-signature');
+  if (!msgId || !timestamp || !webhookSignature) return false;
 
-  for (const provided of candidates) {
-    const providedBuf = Buffer.from(provided.replace(/^sha256=/, ''), 'hex');
-    if (providedBuf.length === expectedHex.length && timingSafeEqual(providedBuf, expectedHex)) {
-      return true;
-    }
+  const timestampSeconds = Number(timestamp);
+  if (!Number.isSafeInteger(timestampSeconds) || Math.abs(nowSeconds - timestampSeconds) > 300) {
+    return false;
   }
 
-  console.warn('[LinqClient] Linq webhook signature verification FAILED.');
-  return false;
+  try {
+    const secretStr = secret.startsWith('whsec_') ? secret.slice(6) : secret;
+    const keyBytes = Buffer.from(secretStr, 'base64');
+    if (keyBytes.length < 16) return false;
+
+    const expected = createHmac('sha256', keyBytes)
+      .update(`${msgId}.${timestamp}.${rawBody}`)
+      .digest();
+
+    return webhookSignature.split(' ').some((signature) => {
+      if (!signature.startsWith('v1,')) return false;
+      const provided = Buffer.from(signature.slice(3), 'base64');
+      return provided.length === expected.length && timingSafeEqual(provided, expected);
+    });
+  } catch {
+    return false;
+  }
 }
 
 export interface LinqWebhookSubscription {

@@ -1,12 +1,13 @@
 import type { ChatChannel } from './types';
 
+const CHAT_SEND_TIMEOUT_MS = 15_000;
+
 /**
  * Send a message to a Telegram chat using the bot token.
  */
 export async function sendTelegramMessage(chatId: string | number, text: string): Promise<boolean> {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) {
-    console.warn('[ChatSenders] TELEGRAM_BOT_TOKEN missing in environment variables.');
     return false;
   }
 
@@ -20,12 +21,12 @@ export async function sendTelegramMessage(chatId: string | number, text: string)
         parse_mode: 'Markdown',
         disable_web_page_preview: false,
       }),
+      signal: AbortSignal.timeout(CHAT_SEND_TIMEOUT_MS),
     });
 
     if (res.ok) return true;
 
-    const errText = await res.text();
-    console.warn(`[ChatSenders] Telegram sendMessage with Markdown failed (${res.status}): ${errText}. Retrying without parse_mode...`);
+    await res.body?.cancel();
 
     res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
       method: 'POST',
@@ -35,16 +36,15 @@ export async function sendTelegramMessage(chatId: string | number, text: string)
         text,
         disable_web_page_preview: false,
       }),
+      signal: AbortSignal.timeout(CHAT_SEND_TIMEOUT_MS),
     });
 
     if (!res.ok) {
-      const fallbackErr = await res.text();
-      console.error(`[ChatSenders] Telegram sendMessage plain text fallback failed (${res.status}): ${fallbackErr}`);
+      await res.body?.cancel();
     }
 
     return res.ok;
-  } catch (err) {
-    console.error('[ChatSenders] Telegram sendMessage error:', err);
+  } catch {
     return false;
   }
 }
@@ -56,13 +56,10 @@ export async function sendTelegramMessage(chatId: string | number, text: string)
 export async function sendLinqMessage(
   chatId: string,
   text: string,
-  fromNumber: string = '+12134155394'
+  fromNumber: string = process.env.LINQ_FROM_NUMBER || ''
 ): Promise<boolean> {
   const apiKey = process.env.LINQ_API_KEY;
-  if (!apiKey) {
-    console.warn('[ChatSenders] LINQ_API_KEY missing in environment variables.');
-    return false;
-  }
+  if (!apiKey || !fromNumber) return false;
 
   try {
     const trimmedId = (chatId || '').trim();
@@ -83,10 +80,10 @@ export async function sendLinqMessage(
             parts: [{ type: 'text', value: text }],
           },
         }),
+        signal: AbortSignal.timeout(CHAT_SEND_TIMEOUT_MS),
       });
       if (!res.ok) {
-        const errText = await res.text();
-        console.error(`[ChatSenders] Linq POST /v3/chats failed (${res.status}): ${errText}`);
+        await res.body?.cancel();
       }
       return res.ok;
     }
@@ -105,12 +102,12 @@ export async function sendLinqMessage(
             parts: [{ type: 'text', value: text }],
           },
         }),
+        signal: AbortSignal.timeout(CHAT_SEND_TIMEOUT_MS),
       }
     );
     if (res.ok) return true;
 
-    const errText = await res.text();
-    console.error(`[ChatSenders] Linq sendMessage failed (${res.status}): ${errText}. Attempting POST /v3/chats fallback...`);
+    await res.body?.cancel();
 
     // Fallback attempt via POST /v3/chats
     const fallbackRes = await fetch('https://api.linqapp.com/api/partner/v3/chats', {
@@ -126,10 +123,11 @@ export async function sendLinqMessage(
           parts: [{ type: 'text', value: text }],
         },
       }),
+      signal: AbortSignal.timeout(CHAT_SEND_TIMEOUT_MS),
     });
+    if (!fallbackRes.ok) await fallbackRes.body?.cancel();
     return fallbackRes.ok;
-  } catch (err) {
-    console.error('[ChatSenders] Linq sendMessage error:', err);
+  } catch {
     return false;
   }
 }

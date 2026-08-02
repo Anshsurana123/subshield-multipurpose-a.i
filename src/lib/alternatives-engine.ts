@@ -1,12 +1,12 @@
 import { Alternative } from './types';
 import { scrapeLivePrices } from './price-scraper';
-import { supabaseAdmin } from './supabase/server';
+import { getSupabaseAdmin } from './supabase/server';
 
 export async function findAlternatives(vendor: string, currentPrice: number, subscriptionId?: string): Promise<Alternative[]> {
   // Check Supabase cached alternatives first (if cached within 7 days)
   if (subscriptionId) {
     try {
-      const { data: cached } = await supabaseAdmin
+      const { data: cached } = await getSupabaseAdmin()
         .from('alternatives')
         .select('*')
         .eq('subscription_id', subscriptionId);
@@ -44,7 +44,7 @@ export async function findAlternatives(vendor: string, currentPrice: number, sub
         url: a.url,
       }));
 
-      await supabaseAdmin.from('alternatives').insert(rows);
+      await getSupabaseAdmin().from('alternatives').insert(rows);
     } catch (cacheErr) {
       console.warn('[AlternativesEngine] Failed to save alternatives to DB:', cacheErr);
     }

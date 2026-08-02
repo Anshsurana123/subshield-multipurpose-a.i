@@ -51,13 +51,15 @@ export function Header({
         <div className="flex items-center gap-3">
           <NotificationBell notifications={notifications} onDismiss={onDismissNotification} />
 
-          <button
-            onClick={onScanClick}
-            className="inline-flex items-center gap-2 rounded-xl bg-[#176b4b] px-4 py-2 text-xs font-bold text-white shadow-sm transition-all hover:bg-[#10543a]"
-          >
-            <Sparkles size={13} fill="currentColor" />
-            <span>Scan Inbox</span>
-          </button>
+          {onScanClick && (
+            <button
+              onClick={onScanClick}
+              className="inline-flex items-center gap-2 rounded-xl bg-[#176b4b] px-4 py-2 text-xs font-bold text-white shadow-sm transition-all hover:bg-[#10543a]"
+            >
+              <Sparkles size={13} fill="currentColor" />
+              <span>Scan Inbox</span>
+            </button>
+          )}
         </div>
       </div>
     </header>

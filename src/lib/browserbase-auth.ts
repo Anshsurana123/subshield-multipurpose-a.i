@@ -1,4 +1,4 @@
-import { supabaseAdmin } from './supabase/server';
+import { getSupabaseAdmin } from './supabase/server';
 import { chromium } from 'playwright-core';
 
 export interface BrowserbaseSessionInfo {
@@ -62,7 +62,7 @@ export async function createAuthSession(userId?: string): Promise<BrowserbaseSes
 
   // 3. Save context to user record in Supabase if userId is provided
   if (userId) {
-    await supabaseAdmin.from('users').upsert({
+    await getSupabaseAdmin().from('users').upsert({
       id: userId,
       browserbase_context_id: contextId,
       updated_at: new Date().toISOString(),
@@ -96,7 +96,7 @@ export async function createAuthSession(userId?: string): Promise<BrowserbaseSes
 }
 
 export async function saveContextForUser(userId: string, contextId: string): Promise<void> {
-  await supabaseAdmin.from('users').upsert({
+  await getSupabaseAdmin().from('users').upsert({
     id: userId,
     browserbase_context_id: contextId,
     updated_at: new Date().toISOString(),
@@ -104,7 +104,7 @@ export async function saveContextForUser(userId: string, contextId: string): Pro
 }
 
 export async function getContextForUser(userId: string): Promise<string | null> {
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await getSupabaseAdmin()
     .from('users')
     .select('browserbase_context_id')
     .eq('id', userId)

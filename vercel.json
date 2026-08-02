@@ -4,12 +4,12 @@
   "installCommand": "npm install",
   "crons": [
     {
-      "path": "/api/cron/price-scan",
-      "schedule": "0 2 * * *"
+      "path": "/api/internal/workflow",
+      "schedule": "* * * * *"
     },
     {
-      "path": "/api/cron/scan",
-      "schedule": "0 6 * * *"
+      "path": "/api/internal/tracker-scan",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

@@ -1,4 +1,4 @@
-export const PRAVA_API_BASE = process.env.PRAVA_API_BASE || 'https://api.prava.space';
+export const PRAVA_API_BASE = process.env.PRAVA_API_BASE || 'https://sandbox.api.prava.space';
 
 export const CATEGORY_MAP: Record<string, string[]> = {
   'Language Learning': ['Duolingo', 'Babbel', 'Busuu', 'Rosetta Stone'],
@@ -18,5 +18,3 @@ export const PRICE_HIKE_THRESHOLD = 0.05;
 export const UNUSED_DAYS_THRESHOLD = 30;
 export const PRAVA_SESSION_TTL_MINUTES = 15;
 export const DEFAULT_CURRENCY = 'USD';
-export const DEMO_USER_ID = 'subshield_demo_user_001';
-export const DEMO_USER_EMAIL = 'demo@subshield.app';

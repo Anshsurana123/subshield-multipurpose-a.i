@@ -1,95 +1,122 @@
 import { NextResponse } from 'next/server';
-import { processChatMessage } from '@/lib/chat-commands';
-import { sendLinqMessage } from '@/lib/chat-senders';
+import {
+  claimAndEnqueueChannelEvent,
+  resolveChannelIdentity,
+} from '@/lib/channels/repository';
+import { consumeChannelLinkCommand, extractChannelLinkCode } from '@/lib/channels/linking';
+import { consumeRateLimit, PayloadTooLargeError, readLimitedBody } from '@/lib/http/request-safety';
 import { verifyLinqWebhookSignature } from '@/lib/linq-client';
-import { redactPII } from '@/lib/utils';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 60;
+export const maxDuration = 10;
 
-/**
- * Linq webhook — receives `message.received` events from the Linq Partner API.
- *
- * Setup:
- *  1. Add LINQ_API_KEY + LINQ_WEBHOOK_SECRET to .env.local
- *  2. Register this URL as the webhook target:
- *     npx tsx scratch/register-linq-webhook.mjs https://<app>/api/linq/webhook
- *  3. Message the bot via iMessage/RCS/SMS — the product link + price is
- *     processed by the same shared chat logic as Telegram.
- */
+const MAX_BODY_BYTES = 256 * 1024;
+
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  }
+  return '';
+}
+
 export async function POST(request: Request) {
-  try {
-    const rawBody = await request.text();
+  const source = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+  if (!consumeRateLimit(`linq:${source}`, { limit: 60, windowMs: 60_000 })) {
+    return NextResponse.json({ success: false, error: 'Rate limit exceeded' }, { status: 429 });
+  }
 
-    // Security: verify the HMAC-SHA256 signature if a secret is configured.
+  try {
+    const rawBody = await readLimitedBody(request, MAX_BODY_BYTES);
     if (!verifyLinqWebhookSignature(rawBody, request.headers)) {
       return NextResponse.json({ success: false, error: 'Invalid signature' }, { status: 401 });
     }
 
+    const eventId = request.headers.get('webhook-id') || '';
+    if (!eventId) {
+      return NextResponse.json({ success: false, error: 'webhook-id is required' }, { status: 400 });
+    }
+
     const body = JSON.parse(rawBody);
-    console.log('[Linq Webhook] Received event:', redactPII(JSON.stringify(body)).slice(0, 1000));
-
-    // Defensive payload parsing — Linq v3 sends structured messages with a `parts`
-    // array (e.g. [{ type: "text", value: "..." }]), or flat `text`/`content`.
     const message = body?.message ?? body?.data?.message ?? body?.data ?? body;
-
-    let text = '';
-    const rawParts = message?.parts || body?.data?.parts || body?.parts;
-    if (Array.isArray(rawParts) && rawParts.length > 0) {
-      text = rawParts.map((p: any) => p?.value || p?.text || '').filter(Boolean).join(' ');
+    const eventType = firstString(body?.event, body?.type, body?.event_type);
+    if (eventType && !eventType.includes('message.received') && !eventType.includes('message.created')) {
+      return NextResponse.json({ success: true, ignored: true });
     }
-    if (!text) {
-      text = String(
-        message?.text ??
-        message?.content ??
-        body?.data?.text ??
-        body?.text ??
-        ''
-      );
+    if (firstString(message?.direction, body?.data?.direction, body?.direction) === 'outbound') {
+      return NextResponse.json({ success: true, ignored: true });
     }
 
-    const chatId: string | undefined =
-      message?.chat?.id ||
-      message?.chatId ||
-      message?.chat_id ||
-      body?.data?.chat_id ||
-      body?.data?.chatId ||
-      body?.chat_id ||
-      body?.chatId ||
-      body?.chat?.id;
-
-    const eventType = body?.event || body?.type || body?.event_type;
-
-    if (!chatId) {
-      console.warn('[Linq Webhook] No chat ID in payload:', redactPII(JSON.stringify(body)).slice(0, 500));
-      return NextResponse.json({ success: false, error: 'No chat id' }, { status: 400 });
-    }
-
-    // Ignore outbound messages (e.g. sent by the bot itself) to prevent reply loops
-    const direction = message?.direction || body?.data?.direction || body?.direction;
-    if (direction === 'outbound') {
-      return NextResponse.json({ success: true, message: 'Ignored outbound message' });
-    }
-
-    // Only handle incoming text messages; ignore delivery receipts, typing indicators etc.
-    if (!text || (eventType && !String(eventType).includes('message.received') && !String(eventType).includes('message.created'))) {
-      return NextResponse.json({ success: true, message: 'Ignored non-message event' });
-    }
-
-    const replyText = await processChatMessage(text, {
-      userId: `linq_${chatId}`,
-      channel: 'linq',
-      chatId,
-    });
-
-    await sendLinqMessage(chatId, replyText);
-
-    return NextResponse.json({ success: true, reply: replyText });
-  } catch (error: any) {
-    console.error('[Linq Webhook Error]:', error);
-    return NextResponse.json(
-      { success: false, error: error.message || 'Webhook error' },
-      { status: 500 }
+    const parts = message?.parts ?? body?.data?.parts ?? body?.parts;
+    const text = Array.isArray(parts)
+      ? parts.map((part) => firstString(part?.value, part?.text)).filter(Boolean).join(' ')
+      : firstString(message?.text, message?.content, body?.data?.text, body?.text);
+    const chatId = firstString(
+      message?.chat?.id,
+      message?.chatId,
+      message?.chat_id,
+      body?.data?.chat_id,
+      body?.data?.chatId,
+      body?.chat_id,
+      body?.chatId,
+      body?.chat?.id
     );
+    const providerUserId = firstString(
+      message?.sender?.id,
+      message?.sender?.phone_number,
+      message?.from?.id,
+      message?.from?.phone_number,
+      message?.from_phone_number,
+      message?.sender_phone_number,
+      body?.data?.sender_id,
+      body?.sender_id
+    );
+    const participantList = message?.chat?.participants ?? body?.data?.chat?.participants ?? body?.chat?.participants;
+    const isGroupChat = message?.chat?.is_group === true ||
+      body?.data?.chat?.is_group === true ||
+      body?.chat?.is_group === true ||
+      (Array.isArray(participantList) && participantList.length > 2);
+
+    if (!chatId || !providerUserId || !text) {
+      return NextResponse.json({ success: true, ignored: true });
+    }
+    if (isGroupChat) {
+      return NextResponse.json({ success: true, ignored: true, reason: 'private_chat_required' });
+    }
+
+    const linkCode = extractChannelLinkCode(text);
+    if (linkCode) {
+      const link = await consumeChannelLinkCommand({
+        provider: 'linq',
+        eventId,
+        code: linkCode,
+        providerUserId,
+        chatId,
+      });
+      return NextResponse.json({ success: true, ...link });
+    }
+
+    const identity = await resolveChannelIdentity('linq', providerUserId, chatId);
+    if (!identity) return NextResponse.json({ success: true, linked: false });
+
+    const result = await claimAndEnqueueChannelEvent({
+      provider: 'linq',
+      eventId,
+      userId: identity.userId,
+      providerUserId,
+      chatId,
+      text,
+    });
+    if (!result.claimed) return NextResponse.json({ success: true, duplicate: true });
+    return NextResponse.json({ success: true, queued: true });
+  } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: error.status });
+    }
+    if (error instanceof SyntaxError) {
+      return NextResponse.json({ success: false, error: 'Invalid JSON' }, { status: 400 });
+    }
+    console.error('[Linq Webhook] processing failed');
+    return NextResponse.json({ success: false, error: 'Webhook processing failed' }, { status: 500 });
   }
 }

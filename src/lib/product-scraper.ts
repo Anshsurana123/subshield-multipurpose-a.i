@@ -20,7 +20,6 @@ export interface ScrapedProductPrice {
  */
 export async function scrapeLivePrice(productUrl: string): Promise<ScrapedProductPrice> {
   if (!process.env.STEEL_API_KEY) {
-    console.warn('[ProductScraper] STEEL_API_KEY missing — cannot scrape live price.');
     return { price: null, title: null, currency: 'USD' };
   }
 
@@ -145,10 +144,6 @@ export async function scrapeLivePrice(productUrl: string): Promise<ScrapedProduc
 
       return result;
     });
-
-    console.log(
-      `[ProductScraper] ${extracted.price !== null ? `Live price $${extracted.price}` : 'No price found'} for "${extracted.title?.slice(0, 60) || productUrl}"`
-    );
 
     return {
       price: extracted.price,

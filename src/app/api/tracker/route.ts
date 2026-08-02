@@ -1,43 +1,53 @@
 import { NextResponse } from 'next/server';
-import { addTrackedProduct, getTrackedProducts, scanAndBuyTrackedProducts } from '@/lib/price-tracker';
+import { requireSameOrigin, requireUser } from '@/lib/auth/server';
+import { apiError } from '@/lib/http/errors';
+import { addTrackedProduct, getTrackedProducts, TrackerEnrollmentError } from '@/lib/price-tracker';
 
-export async function GET(request: Request) {
+export const dynamic = 'force-dynamic';
+
+export async function GET() {
   try {
-    const { searchParams } = new URL(request.url);
-    const userId = searchParams.get('userId') || 'demo-user-id';
-    const products = await getTrackedProducts(userId);
+    const user = await requireUser();
+    const products = await getTrackedProducts(user.id);
     return NextResponse.json({ success: true, products });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+  } catch (error) {
+    return apiError(error, 'Unable to read tracked products');
   }
 }
 
 export async function POST(request: Request) {
   try {
+    requireSameOrigin(request);
+    const user = await requireUser();
     const body = await request.json();
 
-    // Trigger price scan & auto buy if action === 'scan'
-    if (body.action === 'scan') {
-      const result = await scanAndBuyTrackedProducts(body.userId || 'demo-user-id');
-      return NextResponse.json({ success: true, ...result });
-    }
-
-    if (!body.productUrl || !body.targetPrice) {
+    if (body?.action === 'scan') {
       return NextResponse.json(
-        { success: false, error: 'productUrl and targetPrice are required' },
+        { success: false, error: 'Inline scans are disabled; authenticated cron workflows perform scans' },
+        { status: 503 }
+      );
+    }
+    if (typeof body?.productUrl !== 'string' || !Number.isFinite(Number(body?.targetPrice)) || Number(body.targetPrice) <= 0) {
+      return NextResponse.json(
+        { success: false, error: 'A valid productUrl and positive targetPrice are required' },
         { status: 400 }
       );
     }
 
     const product = await addTrackedProduct({
-      userId: body.userId || 'demo-user-id',
+      userId: user.id,
       productUrl: body.productUrl,
-      productName: body.productName,
+      productName: typeof body.productName === 'string' ? body.productName : undefined,
       targetPrice: Number(body.targetPrice),
+      currency: typeof body.currency === 'string' ? body.currency : undefined,
+      channel: 'web',
+      requestId: request.headers.get('idempotency-key') || undefined,
     });
-
-    return NextResponse.json({ success: true, product });
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 });
+    return NextResponse.json({ success: true, product }, { status: 201 });
+  } catch (error) {
+    if (error instanceof TrackerEnrollmentError) {
+      return NextResponse.json({ success: false, error: error.message }, { status: error.status });
+    }
+    return apiError(error, 'Unable to update tracked products');
   }
 }

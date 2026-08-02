@@ -1,27 +1,16 @@
 import { NextResponse } from 'next/server';
+import { requireUser } from '@/lib/auth/server';
+import { apiError } from '@/lib/http/errors';
 import { pravaClient } from '@/lib/prava-client';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(request: Request) {
+export async function GET() {
   try {
-    const { searchParams } = new URL(request.url);
-    const customerId = searchParams.get('customerId');
-
-    if (!customerId) {
-      return NextResponse.json(
-        { error: 'customerId is required' },
-        { status: 400 }
-      );
-    }
-
-    const cards = await pravaClient.listCards(customerId);
-    return NextResponse.json(cards);
-  } catch (error: any) {
-    console.error('List cards error:', error);
-    return NextResponse.json(
-      { error: error.message || 'Failed to list cards' },
-      { status: 500 }
-    );
+    const user = await requireUser();
+    const cards = await pravaClient.listCards(user.id);
+    return NextResponse.json(cards, { headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) {
+    return apiError(error, 'Unable to list cards');
   }
 }
