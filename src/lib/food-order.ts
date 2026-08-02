@@ -691,47 +691,59 @@ export async function resolvePendingFoodOrder(chatId: string, text: string): Pro
         return `❌ *Prava payment credential unavailable.*\n\nCould not extract one-time card credentials for session \`${sessionId}\`. Order was not placed on Swiggy.`;
       }
 
-      // Execute real card checkout via Swiggy Web automation using the Prava one-time credential
+      // Execute real card checkout via Swiggy Web automation asynchronously
+      // so the chat webhook returns immediately without timing out on Vercel.
       const totalAmt = orderTotal(pending.cartLines);
-      const cardResult = await executeSwiggyWebCheckout(credData.credential, {
-        amount: totalAmt,
-        restaurantName: pending.restaurant.name,
-        deliveryAddress: pending.address.label,
-      });
+      const pendingCtx = pending.ctx;
+      const restaurantName = pending.restaurant.name;
+      const addressLabel = pending.address.label;
 
-      const isApproved = cardResult.status === 'approved';
+      (async () => {
+        try {
+          const cardResult = await executeSwiggyWebCheckout(credData.credential, {
+            amount: totalAmt,
+            restaurantName,
+            deliveryAddress: addressLabel,
+          });
 
-      // Report transaction outcome back to Prava based strictly on real card execution result
-      try {
-        await pravaClient.reportTransactionStatus(sessionId, {
-          txnRefId: credData.txnRefId,
-          txnStatus: isApproved ? 'APPROVED' : 'DECLINED',
-          amountPaid: credData.amount || String(totalAmt),
-          authorizationCode: isApproved ? 'SWIGGY_CARD_OK' : undefined,
-          responseCode: isApproved ? '00' : '05',
-        });
-      } catch (reportErr) {
-        console.warn('[FoodOrder] Failed to report Prava transaction status:', reportErr);
-      }
+          const isApproved = cardResult.status === 'approved';
 
-      if (isApproved) {
-        await removePendingOrder(chatId);
-        return (
-          `✅ *Swiggy card order placed successfully via Prava!*\n\n` +
-          `🏪 *Restaurant*: ${pending.restaurant.name}\n` +
-          `💳 *Payment*: Prava card (Token: \`•••• ${credData.credential.pan.slice(-4)}\`)\n` +
-          (cardResult.orderReference ? `🧾 Order ID: ${cardResult.orderReference}\n` : '') +
-          `Detail: ${cardResult.detail}`
-        );
-      }
+          // Report transaction outcome back to Prava based strictly on real card execution result
+          await pravaClient.reportTransactionStatus(sessionId, {
+            txnRefId: credData.txnRefId,
+            txnStatus: isApproved ? 'APPROVED' : 'DECLINED',
+            amountPaid: credData.amount || String(totalAmt),
+            authorizationCode: isApproved ? 'SWIGGY_CARD_OK' : undefined,
+            responseCode: isApproved ? '00' : '05',
+          });
 
-      return (
-        `⚠️ *Swiggy card order did not complete*\n\n` +
-        `🏪 *Chosen*: **${pending.restaurant.name}**\n` +
-        `💳 *Prava Card*: Tokenized credential issued (\`•••• ${credData.credential.pan.slice(-4)}\`)\n` +
-        `❌ *Checkout Result*: ${cardResult.detail}\n\n` +
-        `The card charge was reported as DECLINED to Prava so no funds were settled.`
-      );
+          const finalReply = isApproved
+            ? `✅ *Swiggy card order placed successfully via Prava!*\n\n` +
+              `🏪 *Restaurant*: ${restaurantName}\n` +
+              `💳 *Payment*: Prava card (Token: \`•••• ${credData.credential.pan.slice(-4)}\`)\n` +
+              (cardResult.orderReference ? `🧾 Order ID: ${cardResult.orderReference}\n` : '') +
+              `Detail: ${cardResult.detail}`
+            : `⚠️ *Swiggy card order did not complete*\n\n` +
+              `🏪 *Chosen*: **${restaurantName}**\n` +
+              `💳 *Prava Card*: Tokenized credential issued (\`•••• ${credData.credential.pan.slice(-4)}\`)\n` +
+              `❌ *Checkout Result*: ${cardResult.detail}\n\n` +
+              `The card charge was reported as DECLINED to Prava so no funds were settled.`;
+
+          const { sendChatMessage } = await import('./chat-senders');
+          await sendChatMessage(pendingCtx.channel, pendingCtx.chatId, finalReply);
+        } catch (execErr: any) {
+          console.error('[FoodOrder] Background checkout error:', execErr);
+          const { sendChatMessage } = await import('./chat-senders');
+          await sendChatMessage(
+            pendingCtx.channel,
+            pendingCtx.chatId,
+            `❌ *Checkout Error*: ${execErr?.message || execErr}`
+          );
+        }
+      })();
+
+      await removePendingOrder(chatId);
+      return `🚀 *Prava payment approved!* Launching cloud browser checkout on Swiggy for **${restaurantName}**… I'll message you here as soon as the order is placed.`;
     }
 
     // Allow switching away from card: if the user says "cash" or "upi" while
