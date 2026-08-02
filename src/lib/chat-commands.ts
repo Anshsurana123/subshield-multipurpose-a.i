@@ -2,6 +2,10 @@ import { addTrackedProduct } from './price-tracker';
 import { parseChatIntent, parseProductUrl, formatPrice } from './chat-intent';
 import type { ChatChannel } from './types';
 
+function isElectronicsOrGeneralProduct(text: string): boolean {
+  return /\b(?:mouse|keyboard|headphones|headset|laptop|phone|charger|cable|monitor|gpu|cpu|ram|ssd|hard drive|case|watch|gadget|camera|speaker|console|controller|tv)\b/i.test(text);
+}
+
 function looksLikeOrderRequest(text: string): boolean {
   return !parseProductUrl(text) &&
     /^\s*(?:please\s+)?(?:order|buy|get|bring|grab|i want|i need|can you order|deliver|send me|purchase)\b/i.test(text);
@@ -66,6 +70,16 @@ export async function processChatMessage(text: string, ctx: ChatContext): Promis
   // The replacement consumes a durable purchase order in a worker after the
   // provider-contract and sandbox gates pass.
   if (looksLikeOrderRequest(trimmed)) {
+    if (isElectronicsOrGeneralProduct(trimmed)) {
+      return `📦 *Electronics & General Products*\n\n` +
+        `"Gaming mouse" is an e-commerce item (not a Swiggy food dish!).\n\n` +
+        `To track an electronics item like a gaming mouse within your budget:\n` +
+        `1️⃣ Find your preferred gaming mouse on Amazon or Flipkart\n` +
+        `2️⃣ Send the product URL + target price here:\n` +
+        `   \`buy this when price reaches 2500 https://amazon.in/dp/...\`\n\n` +
+        `SubShield will monitor the price and alert you when it drops into your target price!`;
+    }
+
     return `🔒 Merchant ordering is currently disabled while per-user accounts, pinned provider contracts, and exact-quote execution are being verified.\n\nYou can still send a public product URL with a target price to create a read-only price alert.`;
   }
 
