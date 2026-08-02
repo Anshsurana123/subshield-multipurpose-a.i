@@ -9,6 +9,8 @@ export interface MerchantPaymentCredentials {
   expiryMonth: string;
   /** 4-digit year. */
   expiryYear: string;
+  /** Optional token cryptogram / ECI value for direct gateway API checkout. */
+  cryptogram?: string;
 }
 
 export interface MerchantExecutionResult {
@@ -273,6 +275,132 @@ export async function executeMerchantCheckout(
     }
 
     return { status: 'failed', detail: `No clear success/decline signal after ~20s. Steps: ${log.join(' → ')}. Audit the Steel session`, finalUrl };
+  } finally {
+    try { await session.browser.close(); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Execute real card payment automation on Swiggy Web using Prava's one-time credential.
+ */
+export async function executeSwiggyWebCheckout(
+  credentials: MerchantPaymentCredentials,
+  opts: { amount?: number; restaurantName?: string; deliveryAddress?: string } = {}
+): Promise<MerchantExecutionResult> {
+  const session = await createSteelSession('https://www.swiggy.com/checkout', {
+    country: process.env.STEEL_COUNTRY || 'IN',
+    stealth: true,
+    solveCaptcha: true,
+  });
+
+  try {
+    const { page } = session;
+    const log: string[] = [];
+    const trace = (step: string) => log.push(step);
+
+    trace('opened swiggy checkout page');
+    await page.waitForTimeout(2000);
+
+    // 1. Locate Credit / Debit Card option on Swiggy web checkout
+    const cardTab = await firstVisible(page, [
+      'button:has-text("Credit/Debit")',
+      'button:has-text("Credit & Debit Cards")',
+      'div:has-text("Credit & Debit Cards")',
+      'div:has-text("Add New Card")',
+      '[data-cy="payment-card-option"]',
+      '#credit-card',
+    ]);
+
+    if (cardTab) {
+      await cardTab.click();
+      trace('clicked Credit/Debit card tab');
+      await page.waitForTimeout(1500);
+    }
+
+    // 2. Fill the card inputs with Prava one-time credential
+    const cardField = await firstVisible(page, FIELD_CARD_NUMBER);
+    if (!cardField) {
+      return {
+        status: 'blocked',
+        detail: `Swiggy payment form not found (steps: ${log.join(' → ')}). User can complete payment on Swiggy directly.`,
+        finalUrl: page.url(),
+      };
+    }
+
+    await cardField.fill(credentials.pan.replace(/\s/g, ''));
+    trace('filled card number token');
+
+    const expiryField = await firstVisible(page, FIELD_EXPIRY);
+    if (expiryField) {
+      await expiryField.fill(`${credentials.expiryMonth}${credentials.expiryYear.slice(-2)}`);
+      trace('filled expiry');
+    }
+
+    const cvvField = await firstVisible(page, FIELD_CVV);
+    if (cvvField) {
+      await cvvField.fill(credentials.cvv);
+      trace('filled dynamic cvv');
+    }
+
+    // 3. Submit payment
+    const submitBtn = await firstVisible(page, [
+      'button:has-text("PAY")',
+      'button:has-text("Pay")',
+      'button:has-text("PROCEED TO PAY")',
+      'button:has-text("Place Order")',
+      'input[type="submit"]',
+    ]);
+
+    if (submitBtn) {
+      await submitBtn.click();
+      trace('submitted card payment on Swiggy web');
+    } else {
+      trace('no explicit submit button found, checking form status');
+    }
+
+    // 4. Poll page for outcome signals
+    const successSignals = [
+      'order placed', 'order confirmed', 'thank you for your order',
+      'payment successful', 'order #', 'swiggy order',
+    ];
+    const declineSignals = [
+      'payment failed', 'card declined', 'transaction declined',
+      'invalid card', 'bank error', 'payment error', 'enter otp',
+    ];
+
+    let finalUrl = page.url();
+    for (let i = 0; i < 5; i++) {
+      await page.waitForTimeout(4000);
+      finalUrl = page.url();
+      const bodyText = (await page.evaluate(() => document.body?.innerText?.slice(0, 4000) || '')).toLowerCase();
+
+      const successHit = successSignals.find((s) => bodyText.includes(s));
+      const declineHit = declineSignals.find((s) => bodyText.includes(s));
+
+      if (successHit) {
+        const orderMatch = bodyText.match(/order\s*(?:id|number|#)?\s*[:#]?\s*([A-Z0-9-]{6,})/i);
+        return {
+          status: 'approved',
+          detail: `Swiggy card payment succeeded ("${successHit}" detected)`,
+          orderReference: orderMatch?.[1],
+          finalUrl,
+        };
+      }
+
+      if (declineHit) {
+        return {
+          status: 'declined',
+          detail: `Swiggy card payment failed ("${declineHit}" detected). Steps: ${log.join(' → ')}`,
+          finalUrl,
+        };
+      }
+    }
+
+    return {
+      status: 'failed',
+      detail: `No definitive outcome signal after 20s. Steps: ${log.join(' → ')}`,
+      finalUrl,
+    };
   } finally {
     try { await session.browser.close(); } catch { /* ignore */ }
   }

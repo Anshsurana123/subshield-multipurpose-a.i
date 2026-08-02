@@ -653,34 +653,66 @@ export async function resolvePendingFoodOrder(chatId: string, text: string): Pro
         return `⏳ I haven't seen your Prava approval yet. Open the secure link and approve it, then reply **done** again.`;
       }
 
-      // Payment approved — finalize the Swiggy order. In production the Prava
-      // one-time credential settles the merchant payment; in sandbox the
-      // merchant may still error at payment options (expected). The pending
-      // entry survives until placement completes so "done" can be retried.
-      const placed = await placeFoodOrderCod(pending, 'Prava card (approved)');
-
-      // Report transaction outcome to Prava so the session is properly closed
-      // and the one-time credential is consumed (mirrors auto-buy.ts behavior).
+      // Retrieve raw payment result from Prava containing the one-time card credential
+      let raw: any = null;
       try {
-        const raw = await pravaClient.fetchRawPaymentResultForExecutor(sessionId);
-        const txn = raw?.transactions?.[0];
-        const item = txn?.line_items?.[0] || raw?.line_items?.[0];
-        const txnRefId = item?.txn_ref_id || item?.txnRefId || '';
-        if (txnRefId) {
-          await pravaClient.reportTransactionStatus(sessionId, {
-            txnRefId,
-            txnStatus: placed.ok ? 'APPROVED' : 'DECLINED',
-            amountPaid: item?.total_amount || item?.totalAmount || String(orderTotal(pending.cartLines)),
-            authorizationCode: placed.ok ? 'CHAT_ORDER_OK' : undefined,
-            responseCode: placed.ok ? '00' : '05',
-          });
-        }
+        raw = await pravaClient.fetchRawPaymentResultForExecutor(sessionId);
+        console.log('[FoodOrder] Raw fetchRawPaymentResultForExecutor response:', JSON.stringify(raw, null, 2));
+      } catch (err) {
+        console.warn('[FoodOrder] Failed to fetch raw payment result:', err);
+      }
+
+      // Extract one-time credential (PAN, CVV, Expiry, Cryptogram)
+      const { extractOneTimeCredential } = await import('./auto-buy');
+      const { executeSwiggyWebCheckout } = await import('./merchant-executor');
+      const credData = extractOneTimeCredential(raw);
+
+      if (!credData) {
+        pendingOrders.delete(chatId);
+        return `❌ *Prava payment credential unavailable.*\n\nCould not extract one-time card credentials for session \`${sessionId}\`. Order was not placed on Swiggy.`;
+      }
+
+      // Execute real card checkout via Swiggy Web automation using the Prava one-time credential
+      const totalAmt = orderTotal(pending.cartLines);
+      const cardResult = await executeSwiggyWebCheckout(credData.credential, {
+        amount: totalAmt,
+        restaurantName: pending.restaurant.name,
+        deliveryAddress: pending.address.label,
+      });
+
+      const isApproved = cardResult.status === 'approved';
+
+      // Report transaction outcome back to Prava based strictly on real card execution result
+      try {
+        await pravaClient.reportTransactionStatus(sessionId, {
+          txnRefId: credData.txnRefId,
+          txnStatus: isApproved ? 'APPROVED' : 'DECLINED',
+          amountPaid: credData.amount || String(totalAmt),
+          authorizationCode: isApproved ? 'SWIGGY_CARD_OK' : undefined,
+          responseCode: isApproved ? '00' : '05',
+        });
       } catch (reportErr) {
         console.warn('[FoodOrder] Failed to report Prava transaction status:', reportErr);
       }
 
-      if (placed.ok) pendingOrders.delete(chatId);
-      return `✅ *Prava payment approved!* Placing your Swiggy order now…\n\n${placed.text}`;
+      if (isApproved) {
+        pendingOrders.delete(chatId);
+        return (
+          `✅ *Swiggy card order placed successfully via Prava!*\n\n` +
+          `🏪 *Restaurant*: ${pending.restaurant.name}\n` +
+          `💳 *Payment*: Prava card (Token: \`•••• ${credData.credential.pan.slice(-4)}\`)\n` +
+          (cardResult.orderReference ? `🧾 Order ID: ${cardResult.orderReference}\n` : '') +
+          `Detail: ${cardResult.detail}`
+        );
+      }
+
+      return (
+        `⚠️ *Swiggy card order did not complete*\n\n` +
+        `🏪 *Chosen*: **${pending.restaurant.name}**\n` +
+        `💳 *Prava Card*: Tokenized credential issued (\`•••• ${credData.credential.pan.slice(-4)}\`)\n` +
+        `❌ *Checkout Result*: ${cardResult.detail}\n\n` +
+        `The card charge was reported as DECLINED to Prava so no funds were settled.`
+      );
     }
 
     // Allow switching away from card: if the user says "cash" or "upi" while

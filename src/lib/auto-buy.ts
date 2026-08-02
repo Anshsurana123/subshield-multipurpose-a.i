@@ -38,6 +38,7 @@ export function extractOneTimeCredential(data: any): {
   const cvv = item?.dynamic_cvv || item?.cvv;
   const expiryMonth = item?.expiry_month || item?.expiryMonth;
   const expiryYear = item?.expiry_year || item?.expiryYear;
+  const cryptogram = item?.cryptogram || item?.token_cryptogram || item?.payment_cryptogram || item?.cryptogram_value || item?.eci;
   const txnRefId = item?.txn_ref_id || item?.txnRefId || '';
 
   if (!token || !cvv || !expiryMonth || !expiryYear || !txnRefId) return null;
@@ -49,6 +50,7 @@ export function extractOneTimeCredential(data: any): {
       cvv: String(cvv),
       expiryMonth: String(expiryMonth).padStart(2, '0'),
       expiryYear: String(expiryYear),
+      cryptogram: cryptogram ? String(cryptogram) : undefined,
     },
     amount: item?.total_amount || item?.totalAmount || '',
   };
